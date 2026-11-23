@@ -229,7 +229,7 @@ python -m benchmarks.bench_crawler --scenario all --levels 1,2,4,8,16 --runs 5
 
 Scenarios cover low and high latency, a slow server, dropped connections,
 large responses, and pages full of duplicate links. Each level is run several
-times; the report separates graph size, visited pages, HTTP requests,
+times; the report separates graph size, responses, attempts, HTTP requests,
 successful fetches, transport errors, elapsed time, throughput, and the
 maximum concurrency actually observed by the server, and prints best/median/min
 throughput plus the spread. These are single-machine measurements — compare

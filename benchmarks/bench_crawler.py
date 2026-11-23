@@ -11,7 +11,8 @@ performance measurement.
 Metrics distinguish what is easy to confuse:
 
 * ``graph_pages``   pages that exist in the synthetic site
-* ``visited``       pages the crawler enqueued and attempted
+* ``responses``     fetches that produced an HTTP response (any status)
+* ``attempts``      ``responses + errors``: every URL the crawler tried
 * ``requests``      HTTP requests actually issued (redirects included)
 * ``successes``     fetches with a 2xx status
 * ``errors``        fetches that failed at the transport/policy level
@@ -164,12 +165,16 @@ class BenchHandler(BaseHTTPRequestHandler):
 class RunResult:
     workers: int
     elapsed: float
-    visited: int
+    responses: int
     requests: int
     successes: int
     errors: int
     findings: int
     observed_concurrency: int
+
+    @property
+    def attempts(self) -> int:
+        return self.responses + self.errors
 
 
 @dataclass
@@ -191,7 +196,8 @@ class LevelResult:
         return {
             "workers": self.workers,
             "runs": len(self.runs),
-            "pages_visited": best.visited,
+            "responses": best.responses,
+            "attempts": best.attempts,
             "requests": best.requests,
             "successes": best.successes,
             "errors": best.errors,
@@ -237,7 +243,7 @@ async def run_once(server_url: str, depth: int, workers: int) -> RunResult:
     return RunResult(
         workers=workers,
         elapsed=elapsed,
-        visited=engine.pages_fetched,
+        responses=engine.pages_fetched,
         requests=engine.requests_made,
         successes=engine.successful_pages,
         errors=len(engine.errors),
@@ -264,7 +270,8 @@ async def run_levels(
                         "workers": workers,
                         "run": run_index + 1,
                         "elapsed": round(result.elapsed, 4),
-                        "visited": result.visited,
+                        "responses": result.responses,
+                        "attempts": result.attempts,
                         "requests": result.requests,
                         "successes": result.successes,
                         "errors": result.errors,
@@ -317,7 +324,7 @@ def benchmark_scenario(
     for level in results:
         summary = level.summary()
         print(
-            "workers={workers} visited={pages_visited} requests={requests} "
+            "workers={workers} responses={responses} attempts={attempts} requests={requests} "
             "successes={successes} errors={errors} concurrency={observed_concurrency} "
             "throughput best/median/min={throughput_best}/{throughput_median}/{throughput_min} p/s "
             "spread={throughput_spread_pct}%".format(**summary)

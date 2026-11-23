@@ -199,6 +199,8 @@ class Engine:
         depth: int,
     ) -> None:
         log.info("[%d] %s", depth, url)
+        # Count the attempt before awaiting so failed requests are not invisible.
+        self.requests_made += 1
         try:
             result = await fetch_response(
                 session,
@@ -218,7 +220,7 @@ class Engine:
             return
 
         self.pages_fetched += 1
-        self.requests_made += 1 + len(result.redirects)
+        self.requests_made += len(result.redirects)
         self.redirects_followed += len(result.redirects)
         self.status_counts[result.status] = self.status_counts.get(result.status, 0) + 1
         self._mark_crawled(url, result)

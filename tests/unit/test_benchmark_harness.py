@@ -30,9 +30,10 @@ def test_benchmark_reports_consistent_metrics() -> None:
         assert len(level.runs) == 2
         best = level.best
         assert best.elapsed > 0
-        assert 0 < best.visited <= UNIVERSE_PAGES
-        assert best.requests >= best.visited
-        assert best.successes + best.errors <= best.requests + 1
+        assert 0 < best.responses <= UNIVERSE_PAGES
+        assert best.requests >= best.responses
+        assert best.attempts == best.responses + best.errors
+        assert best.successes <= best.responses
         assert best.observed_concurrency <= level.workers
 
 
@@ -49,7 +50,9 @@ def test_flaky_scenario_reports_transport_errors() -> None:
     scenario = Scenario("flaky-test", pages=8, latency_ms=0, failure_every=2)
     levels = run_scenario(scenario, depth=2, levels=[4], runs=1)
 
-    assert levels[0].runs[0].errors >= 1
+    run = levels[0].runs[0]
+    assert run.errors >= 1
+    assert run.attempts > run.responses
 
 
 def test_every_scenario_builds_a_graph() -> None:
@@ -66,7 +69,7 @@ def test_duplicate_link_scenario_does_not_inflate_visits() -> None:
     levels = run_scenario(scenario, depth=2, levels=[4], runs=1)
     best = levels[0].best
 
-    assert best.visited <= UNIVERSE_PAGES
+    assert best.responses <= UNIVERSE_PAGES
     assert best.successes <= UNIVERSE_PAGES
 
 
