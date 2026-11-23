@@ -64,6 +64,8 @@ jobs:
       - name: Tests
         run: |
           pytest tests/ --strict-markers -q
+        env:
+          PYTHONPATH: .
 
       - name: Coverage
         run: |
