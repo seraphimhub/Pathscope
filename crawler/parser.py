@@ -1,10 +1,13 @@
+from urllib.parse import urldefrag, urljoin, urlparse
+
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urldefrag
+
 
 def normalize(url):
     url, _ = urldefrag(url)
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
 
 def extract_links(html, base_url, base_host):
     soup = BeautifulSoup(html, "html.parser")

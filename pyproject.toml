@@ -1,0 +1,75 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["crawler", "scanners", "core"]
+branch = true
+omit = [".venv/**", "tests/**", "output/**"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+  "# pragma: no cover",
+  "def __repr__",
+  "if __name__ == .__main__.",
+  "raise AssertionError",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING:",
+  "except ImportError:",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF", "S", "SIM"]
+ignore = [
+  "E501",
+  "S101",
+  "S301",
+  "S302",
+  "S303",
+  "S304",
+  "S305",
+  "S307",
+  "S308",
+  "S310",
+  "S311",
+  "B007",
+  "B008",
+  "B904",
+  "RUF009",
+  "S105",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "crawler", "scanners", "reporting", "storage", "security"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S108", "S301", "S302", "S303", "S304", "S305", "S307", "S308", "S310", "S311", "B007", "B008", "B904", "RUF009", "E501"]
+"cli.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+show_error_codes = true
+exclude = [".venv", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["core.config"]
+ignore_errors = true
+
+[tool.benchmarks]
+# Reproducible crawler benchmark defaults.
+host = "127.0.0.1"
+port = 0
+depth = 4
+runs = 1
+levels = "1,4,8"

@@ -1,140 +1,67 @@
 # Contributing to Pathscope
 
-Thank you for your interest in contributing to **Pathscope**.
+Pathscope is a security engineering tool for authorized web discovery and attack surface intelligence. Contributions should preserve that goal and the safety constraints around it.
 
-This project is designed as a high-performance asynchronous web discovery framework for **authorized internal auditing**, route intelligence, and scalable security engineering workflows.
+## Project principles
 
-We welcome high-quality contributions that improve reliability, modularity, and maintainability.
+- Write for authorized auditing only.
+- Keep discovery and verification separate.
+- Fail safely on bad input, network failures, and scope violations.
+- Do not store or print secrets in plain text.
+- Do not add placeholder features and mark them as available.
 
----
+## Development setup
 
-## Development Principles
-Please keep contributions aligned with the following goals:
-
-- performance-first async architecture
-- modular scanner design
-- production-safe defaults
-- clean package boundaries
-- minimal dependency overhead
-- readable and testable code
-
----
-
-## Local Setup
-Clone the repository:
-
-```bash id="i5z3zj"
-git clone https://github.com/seraphim-blip/pathscope.git
-cd pathscope
-````
-
-Create virtual environment:
-
-```bash id="0m1s4t"
+```bash
 python3 -m venv .venv
-source .venv/bin/activate
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install pytest pytest-asyncio pytest-cov ruff mypy bandit
 ```
 
-Install dependencies:
+## Running checks
 
-```bash id="2a6n1r"
-pip install -r requirements.txt
+```bash
+.venv/bin/python -m pytest tests/ -q --strict-markers
+.venv/bin/python -m compileall -q .
+.venv/bin/ruff check .
+.venv/bin/python -m mypy core crawler scanners --ignore-missing-imports
+.venv/bin/bandit -r core scanners
 ```
 
-Optional browser rendering:
+Type checking with mypy is currently configured to ignore missing library stubs for third-party packages.
 
-```bash id="r8u0lm"
-playwright install chromium
-```
+## Testing standards
 
----
+- Add unit tests for URL normalization, scope filtering, parsing, endpoint extraction, secret scanning, retry behavior, redirect handling, and output serialization.
+- Add integration tests against a local mock HTTP server where possible.
+- Add security regression tests for SSRF, redirect scope escape, private/loopback targets, oversized responses, and malformed input.
+- Do not add tests that only assert mock call counts without checking behavior.
 
-## Branching
+## Code quality expectations
 
-Create a feature branch:
+- Keep public interfaces typed where reasonable.
+- Use structured logging instead of free-form stdout for operational state.
+- Keep errors explicit and centralized where practical.
+- Do not store large response bodies without retention limits.
 
-```bash id="3l0v8e"
-git checkout -b feature/your-module-name
-```
+## Security
 
-Examples:
+- Never commit credentials, tokens, private keys, or fake secrets that resemble real ones too closely.
+- Do not introduce unsafe request behavior.
+- When adding new networking code, include scope and safety checks.
 
-* `feature/playwright-renderer`
-* `feature/redis-queue`
-* `fix/parser-normalization`
+## Pull requests
 
----
+- Keep changes focused.
+- Include tests for new behavior.
+- Update documentation only for features that are actually implemented.
+- Do not include AI attribution, watermarks, or generated-by metadata in commits.
 
-## Code Style
+## Reporting issues
 
-Please follow:
-
-* Python 3.10+
-* PEP8 formatting
-* explicit imports
-* descriptive function names
-* modular responsibilities
-* no dead code
-* no hardcoded secrets
-
-Recommended tooling:
-
-```bash id="6d5x8g"
-pip install ruff pytest
-```
-
-Run checks:
-
-```bash id="m4f6n2"
-python -m compileall .
-ruff check .
-pytest
-```
-
----
-
-## Pull Request Guidelines
-
-A high-quality PR should include:
-
-* clear problem statement
-* implementation details
-* expected impact
-* test coverage where applicable
-* documentation updates if behavior changes
-
-Please keep pull requests focused and avoid unrelated refactors.
-
----
-
-## Areas of Contribution
-
-We especially welcome work in:
-
-* async crawl optimization
-* parser robustness
-* SPA route rendering
-* reporting exporters
-* authentication-aware crawling
-* scanner plugin interfaces
-* CI improvements
-* documentation quality
-
----
-
-## Responsible Use
-
-Contributions must preserve the project’s intended purpose:
-**authorized internal auditing and engineering visibility only**.
-
-Do not introduce features intended to bypass authorization, abuse access controls, or increase operational risk.
-
----
-
-## Community Standards
-
-Please be respectful, technically precise, and solution-oriented in issues and pull requests.
-
----
-
-Thank you for helping improve Pathscope.
+Include:
+- what you ran
+- the target behavior
+- the actual behavior
+- environment details if relevant

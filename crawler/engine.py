@@ -1,12 +1,14 @@
 import asyncio
 import json
 from urllib.parse import urlparse
+
 import aiohttp
 
 from crawler.fetcher import fetch
 from crawler.parser import extract_links, normalize
-from scanners.secrets import scan_secrets
 from scanners.endpoints import scan_endpoints
+from scanners.secrets import scan_secrets
+
 
 class Engine:
     def __init__(self, start_url, depth=20):
