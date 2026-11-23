@@ -35,7 +35,7 @@ FLOAT_OPTIONS: dict[str, tuple[float, float]] = {
     "timeout": (0.1, 600.0),
 }
 
-BOOL_OPTIONS = frozenset({"secrets", "endpoints", "js", "block_private"})
+BOOL_OPTIONS = frozenset({"secrets", "endpoints", "js", "block_private", "allow_scheme_downgrade"})
 
 STR_OPTIONS = frozenset({"target", "headers", "cookie", "api", "auth", "output_dir"})
 

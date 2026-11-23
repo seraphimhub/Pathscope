@@ -15,6 +15,7 @@ from urllib.parse import urljoin
 import aiohttp
 
 from core.exceptions import FetchError
+from core.security import redirect_scheme_violation
 
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
@@ -76,11 +77,14 @@ async def fetch_response(
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
     max_bytes: int = DEFAULT_MAX_BYTES,
     allow_redirect_to: Callable[[str], bool] | None = None,
+    allow_scheme_downgrade: bool = False,
 ) -> FetchResult:
     """Fetch ``url`` following at most ``max_redirects`` hops.
 
     ``allow_redirect_to`` is consulted for every hop and may veto it (raise or
     return False); the engine uses it to keep redirects inside the scan scope.
+    Every hop is also checked for an https -> http downgrade, which would send
+    session headers in cleartext; set ``allow_scheme_downgrade`` to opt in.
     """
     if session is None:
         return FetchResult(url=url)
@@ -101,6 +105,13 @@ async def fetch_response(
                     target = urljoin(current, location)
                     if target in chain or target == current:
                         raise FetchError(current, reason="redirect loop detected")
+                    scheme_violation = redirect_scheme_violation(
+                        current,
+                        target,
+                        allow_scheme_downgrade=allow_scheme_downgrade,
+                    )
+                    if scheme_violation is not None:
+                        raise FetchError(target, reason=scheme_violation)
                     if allow_redirect_to is not None and not allow_redirect_to(target):
                         raise FetchError(target, reason="redirect target rejected by scope policy")
                     if len(chain) >= redirect_budget:
@@ -150,6 +161,7 @@ async def fetch(
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
     max_bytes: int = DEFAULT_MAX_BYTES,
     allow_redirect_to: Callable[[str], bool] | None = None,
+    allow_scheme_downgrade: bool = False,
 ) -> str:
     """Fetch a URL and return its text body (empty string for non-text/error)."""
     result = await fetch_response(
@@ -159,6 +171,7 @@ async def fetch(
         max_redirects=max_redirects,
         max_bytes=max_bytes,
         allow_redirect_to=allow_redirect_to,
+        allow_scheme_downgrade=allow_scheme_downgrade,
     )
     return result.text
 

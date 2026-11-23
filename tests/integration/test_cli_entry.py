@@ -33,6 +33,7 @@ def test_cli_accepts_required_kwargs() -> None:
         "timeout",
         "max_redirects",
         "block_private",
+        "allow_scheme_downgrade",
         "explicit",
     ]
     assert params == expected

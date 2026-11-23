@@ -46,6 +46,46 @@ METADATA_HOSTS = frozenset(
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
+def _legacy_ipv4_value(candidate: str) -> str | None:
+    """Return a dotted-quad for inet_aton-style spellings, else ``None``.
+
+    Sockets accept ``2130706433``, ``0x7f000001``, ``017700000001`` and
+    ``127.1`` as IPv4 addresses, while ``ipaddress`` does not. Treating those
+    strings as hostnames made policy checks disagree with the address the
+    socket actually dialed, so they are normalized here instead. Values that
+    do not form a valid address are returned unchanged by the caller.
+    """
+    parts = candidate.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+
+    values: list[int] = []
+    for part in parts:
+        if not part:
+            return None
+        try:
+            if part.lower().startswith("0x"):
+                values.append(int(part, 16))
+            elif len(part) > 1 and part.startswith("0"):
+                values.append(int(part, 8))
+            else:
+                values.append(int(part, 10))
+        except ValueError:
+            return None
+
+    for value in values[:-1]:
+        if not 0 <= value <= 255:
+            return None
+    last_limit = {1: 0xFFFFFFFF, 2: 0xFFFFFF, 3: 0xFFFF, 4: 0xFF}[len(values)]
+    if not 0 <= values[-1] <= last_limit:
+        return None
+
+    total = values[-1]
+    for index, value in enumerate(values[:-1]):
+        total |= value << (8 * (3 - index))
+    return str(ipaddress.IPv4Address(total))
+
+
 def canonical_host(host: str) -> str:
     """Return a comparable form of ``host``: lower-case, IDNA, no trailing dot.
 
@@ -60,6 +100,10 @@ def canonical_host(host: str) -> str:
         return ipaddress.ip_address(candidate).compressed
     except ValueError:
         pass
+
+    legacy = _legacy_ipv4_value(candidate)
+    if legacy is not None:
+        return legacy
 
     try:
         return candidate.encode("idna").decode("ascii").lower()
@@ -139,6 +183,32 @@ def has_allowed_scheme(url: str) -> bool:
     except ValueError:
         return False
     return parsed.scheme.lower() in ALLOWED_SCHEMES and bool(parsed.hostname)
+
+
+def redirect_scheme_violation(
+    current_url: str,
+    target_url: str,
+    *,
+    allow_scheme_downgrade: bool = False,
+) -> str | None:
+    """Return the reason a redirect hop must be refused for its scheme.
+
+    Session headers (Authorization, Cookie) are attached to every request, so
+    an https -> http hop would send them in cleartext. Downgrades are refused
+    unless the caller explicitly opts in; scheme upgrades and same-scheme hops
+    are allowed. Ports are not compared here: scope checks already compare the
+    canonical ``host:port`` pair for every hop.
+    """
+    try:
+        current_scheme = urlparse(current_url).scheme.lower()
+        target_scheme = urlparse(target_url).scheme.lower()
+    except ValueError:
+        return "invalid redirect target"
+    if target_scheme not in ALLOWED_SCHEMES:
+        return "unsupported redirect scheme"
+    if not allow_scheme_downgrade and current_scheme == "https" and target_scheme == "http":
+        return "redirect from https to cleartext http rejected"
+    return None
 
 
 def is_global_address(address: str) -> bool:

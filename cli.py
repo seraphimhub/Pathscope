@@ -131,6 +131,7 @@ async def _run_cli(
     timeout: float = DEFAULT_TIMEOUT,
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
     block_private: bool = False,
+    allow_scheme_downgrade: bool = False,
     explicit: dict[str, Any] | None = None,
 ) -> int:
     """Run one Pathscope scan using the resolved CLI + config + env values."""
@@ -161,6 +162,7 @@ async def _run_cli(
         "timeout": timeout,
         "max_redirects": max_redirects,
         "block_private": block_private,
+        "allow_scheme_downgrade": allow_scheme_downgrade,
     }
 
     try:
@@ -188,6 +190,7 @@ async def _run_cli(
     timeout = float(merged["timeout"])
     max_redirects = int(merged["max_redirects"])
     block_private = bool(merged["block_private"])
+    allow_scheme_downgrade = bool(merged["allow_scheme_downgrade"])
 
     os.environ["TARGET_URL"] = str(resolved_target)
     os.environ["CRAWL_DEPTH"] = str(depth)
@@ -205,6 +208,7 @@ async def _run_cli(
         scan_secrets_enabled=secrets,
         scan_endpoints_enabled=endpoints,
         scan_js=js,
+        allow_scheme_downgrade=allow_scheme_downgrade,
         output_dir=output_dir,
     )
 
@@ -231,6 +235,7 @@ async def _run_cli(
     if not quiet:
         click.echo("\n[!] Scan complete")
         click.echo(f"[*] Findings written to {os.path.join(output_dir, 'findings.json')}")
+        click.echo(f"[*] Scan metadata written to {os.path.join(output_dir, 'scan.json')}")
         click.echo("")
         click.echo(f"Total Discovered : {discovered}")
         click.echo(f"Total Pages      : {runner.pages_fetched}")
@@ -337,6 +342,13 @@ TARGET_OPTION = click.option(
     show_default=True,
     help="Refuse loopback, private, link-local and metadata targets.",
 )
+@click.option(
+    "--allow-scheme-downgrade",
+    "allow_scheme_downgrade",
+    is_flag=True,
+    default=False,
+    help="Follow https -> http redirects (sends session headers in cleartext).",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -359,6 +371,7 @@ def cli(
     timeout: float,
     max_redirects: int,
     block_private: bool,
+    allow_scheme_downgrade: bool,
 ) -> None:
     """Pathscope: professional web discovery and attack surface intelligence."""
     explicit = {
@@ -379,6 +392,7 @@ def cli(
             "timeout": timeout,
             "max_redirects": max_redirects,
             "block_private": block_private,
+            "allow_scheme_downgrade": allow_scheme_downgrade,
         }.items()
         if ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
     }
@@ -404,6 +418,7 @@ def cli(
                 timeout=timeout,
                 max_redirects=max_redirects,
                 block_private=block_private,
+                allow_scheme_downgrade=allow_scheme_downgrade,
                 explicit=explicit,
             )
         )

@@ -156,6 +156,24 @@ def test_scope_settings_from_config_are_validated() -> None:
         merge_cli_options({"depth": 2}, {"depth": 999})
 
 
+def test_scheme_downgrade_opt_in_is_a_validated_boolean() -> None:
+    merged = merge_cli_options(
+        {"allow_scheme_downgrade": False},
+        {"allow_scheme_downgrade": "yes"},
+    )
+    assert merged["allow_scheme_downgrade"] is True
+
+    explicit = merge_cli_options(
+        {"allow_scheme_downgrade": False},
+        {"allow_scheme_downgrade": True},
+        {"allow_scheme_downgrade": False},
+    )
+    assert explicit["allow_scheme_downgrade"] is False
+
+    with pytest.raises(ConfigurationError):
+        validate_scan_options({"allow_scheme_downgrade": "sometimes"})
+
+
 # ---------------------------------------------------------------------------
 # CLI behaviour on bad configuration
 # ---------------------------------------------------------------------------

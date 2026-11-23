@@ -128,6 +128,7 @@ python3 cli.py --target https://example.com --depth 3 --workers 8
                           or PATHSCOPE_OUTPUT_DIR)
 --block-private           refuse loopback/private/link-local/metadata targets
 --allow-private           permit private targets (default)
+--allow-scheme-downgrade  follow https -> http redirects (off by default)
 --secrets/--no-secrets    toggle secret pattern scanning (default on)
 --endpoints/--no-endpoints
                           toggle endpoint discovery (default on)
@@ -185,8 +186,15 @@ contain the matched secret value: quoted literals and long unquoted values in
 `evidence` are masked with `*`. A match is a pattern occurrence only — Pathscope
 does not verify that a credential is live and never uses one.
 
-`--json` prints a separate machine-readable scan summary (pages, requests,
-successful fetches, errors, redirects, elapsed time) to stdout.
+Endpoints stay globally de-duplicated and add a `pages` list naming every page
+that exposed one. Secret patterns are de-duplicated per page, pattern, and line,
+so the same pattern on the same line of two pages is two findings.
+
+`<output_dir>/scan.json` records the scan metadata (target, scope, timestamps,
+effective configuration, counters, status counts) and the full error list, so a
+failed URL is auditable after the run instead of only living in the terminal.
+Both output files are written atomically and are readable by the owner only
+(`0600`). `--json` prints a separate machine-readable scan summary to stdout.
 
 ---
 
@@ -202,7 +210,10 @@ fetcher, and every URL source (links, JavaScript, redirects):
   dropped even when reachable — the policy supports an explicit subdomain
   opt-in, but the crawler does not enable it;
 * redirect `Location` headers are re-checked hop by hop and never trusted
-  because the original host passed;
+  because the original host passed; the canonical `host:port` pair must stay
+  identical, and an `https` -> `http` hop is refused by default because the
+  session's auth/cookie headers would be sent in cleartext
+  (`--allow-scheme-downgrade` opts in explicitly);
 * with `--block-private`, address checks run **inside the resolver handed to
   the HTTP transport**. Every address in the DNS answer (IPv4, IPv6,
   IPv4-mapped, loopback, private, link-local, unspecified, multicast) is

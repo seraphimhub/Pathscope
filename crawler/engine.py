@@ -14,10 +14,13 @@ Design constraints:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import tempfile
 import time
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -68,6 +71,7 @@ class Engine:
         scan_secrets_enabled: bool = True,
         scan_endpoints_enabled: bool = True,
         scan_js: bool = True,
+        allow_scheme_downgrade: bool = False,
         persist: bool = True,
         output_dir: str = "output",
     ) -> None:
@@ -88,6 +92,7 @@ class Engine:
         self.scan_secrets_enabled = scan_secrets_enabled
         self.scan_endpoints_enabled = scan_endpoints_enabled
         self.scan_js = scan_js
+        self.allow_scheme_downgrade = allow_scheme_downgrade
         self.persist = persist
         self.output_dir = output_dir
 
@@ -101,9 +106,12 @@ class Engine:
         self.requests_made: int = 0
         self.redirects_followed: int = 0
         self.status_counts: dict[int, int] = {}
+        self.started_at: datetime | None = None
+        self.finished_at: datetime | None = None
 
-        self._finding_keys: set[tuple[Any, ...]] = set()
+        self._findings_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._queued: set[str] = set()
+        self._discovered_by_url: dict[str, DiscoveredUrl] = {}
 
     # -- public API ---------------------------------------------------------
 
@@ -128,6 +136,7 @@ class Engine:
         )
 
         started = time.perf_counter()
+        self.started_at = datetime.now(UTC)
         queue: asyncio.Queue[tuple[str, int] | None] = asyncio.Queue()
         self._enqueue(queue, target, depth=0, source_url=self.start_url, method="seed")
 
@@ -156,18 +165,63 @@ class Engine:
                     await asyncio.gather(*workers, return_exceptions=True)
         finally:
             self.elapsed = time.perf_counter() - started
+            self.finished_at = datetime.now(UTC)
             if resolver is not None:
                 await resolver.close()
             if self.persist:
                 self.write_findings()
 
     def write_findings(self) -> str:
-        """Write findings to ``<output_dir>/findings.json`` and return the path."""
+        """Write findings and scan metadata, returning the findings path.
+
+        ``findings.json`` keeps its historical list shape; scan metadata and
+        the full error list go to ``scan.json`` in the same directory. Both
+        files are written atomically and are readable by the owner only.
+        """
         os.makedirs(self.output_dir, exist_ok=True)
         path = os.path.join(self.output_dir, "findings.json")
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(self.findings, handle, indent=2, default=str)
+        _write_json_atomic(path, self.findings)
+        _write_json_atomic(os.path.join(self.output_dir, "scan.json"), self.scan_metadata())
         return path
+
+    def scan_metadata(self) -> dict[str, Any]:
+        """Return a JSON-safe description of this scan."""
+        finished = self.finished_at or datetime.now(UTC)
+        started = self.started_at or finished
+        return {
+            "tool": "pathscope",
+            "target": self.start_url,
+            "scope": self.base_host,
+            "started_at": started.isoformat(),
+            "finished_at": finished.isoformat(),
+            "elapsed": round(self.elapsed, 3),
+            "elapsed_seconds": round((finished - started).total_seconds(), 3),
+            "counters": {
+                "discovered": len(self.discovered_urls),
+                "pages": self.pages_fetched,
+                "requests": self.requests_made,
+                "successful": self.successful_pages,
+                "failed": self.failed_pages,
+                "redirects": self.redirects_followed,
+                "findings": len(self.findings),
+                "endpoints": len(self.endpoints),
+                "errors": len(self.errors),
+            },
+            "config": {
+                "depth": self.max_depth,
+                "workers": self.workers,
+                "max_pages": self.max_pages,
+                "timeout": self.timeout,
+                "max_redirects": self.max_redirects,
+                "block_private": self.block_private,
+                "allow_scheme_downgrade": self.allow_scheme_downgrade,
+                "secrets": self.scan_secrets_enabled,
+                "endpoints": self.scan_endpoints_enabled,
+                "js": self.scan_js,
+            },
+            "status_counts": {str(status): count for status, count in self.status_counts.items()},
+            "errors": self.errors,
+        }
 
     # -- crawl loop ---------------------------------------------------------
 
@@ -209,6 +263,7 @@ class Engine:
                 max_redirects=self.max_redirects,
                 max_bytes=self.max_bytes,
                 allow_redirect_to=self._redirect_allowed,
+                allow_scheme_downgrade=self.allow_scheme_downgrade,
             )
         except PathscopeError as exc:
             self._record_error(url, exc)
@@ -282,15 +337,15 @@ class Engine:
     ) -> None:
         self._queued.add(url)
         self.visited.add(url)
-        self.discovered_urls.append(
-            DiscoveredUrl.from_url(
-                url,
-                depth=depth,
-                source_url=source_url,
-                discovery_method=method,
-                parent_url=source_url,
-            )
+        discovered = DiscoveredUrl.from_url(
+            url,
+            depth=depth,
+            source_url=source_url,
+            discovery_method=method,
+            parent_url=source_url,
         )
+        self.discovered_urls.append(discovered)
+        self._discovered_by_url[normalize(url)] = discovered
         queue.put_nowait((url, depth))
 
     # -- helpers ------------------------------------------------------------
@@ -312,29 +367,53 @@ class Engine:
 
         if self.scan_endpoints_enabled:
             for finding in scan_endpoints(page_url, result.text):
-                self._add_finding(finding, key=("endpoint", finding.get("endpoint")))
+                self._add_finding(
+                    finding,
+                    key=("endpoint", finding.get("endpoint")),
+                    page_url=page_url,
+                )
 
         if self.scan_secrets_enabled:
             for finding in scan_secrets(page_url, result.text):
                 self._add_finding(
                     finding,
-                    key=("secret", finding.get("pattern"), finding.get("line", 0)),
+                    key=(
+                        "secret",
+                        finding.get("url"),
+                        finding.get("pattern"),
+                        finding.get("line", 0),
+                    ),
+                    page_url=page_url,
                 )
 
-    def _add_finding(self, finding: dict[str, Any], *, key: tuple[Any, ...]) -> None:
-        if key in self._finding_keys:
+    def _add_finding(
+        self,
+        finding: dict[str, Any],
+        *,
+        key: tuple[Any, ...],
+        page_url: str,
+    ) -> None:
+        existing = self._findings_by_key.get(key)
+        if existing is not None:
+            # Endpoints are deduplicated globally, but every page that exposed
+            # one is kept so a reviewer knows where to look.
+            pages = existing.setdefault("pages", [])
+            if page_url not in pages:
+                pages.append(page_url)
             return
-        self._finding_keys.add(key)
+        if finding.get("type") == "endpoint":
+            finding["pages"] = [page_url]
+        self._findings_by_key[key] = finding
         self.findings.append(finding)
         if finding.get("type") == "endpoint":
             self.endpoints.append(finding)
 
     def _mark_crawled(self, url: str, result: FetchResult) -> None:
-        for discovered in self.discovered_urls:
-            if discovered.normalized == normalize(url):
-                discovered.crawled = True
-                discovered.url = result.url or discovered.url
-                break
+        discovered = self._discovered_by_url.get(normalize(url))
+        if discovered is None:
+            return
+        discovered.crawled = True
+        discovered.url = result.url or discovered.url
 
     def _record_error(self, url: str, exc: BaseException) -> None:
         self.errors.append(
@@ -356,6 +435,23 @@ class Engine:
         if not media_type:
             return not _looks_like_javascript(result.url, result.content_type)
         return False
+
+
+def _write_json_atomic(path: str, payload: Any) -> None:
+    """Write ``payload`` to ``path`` atomically with owner-only permissions."""
+    directory = os.path.dirname(path) or "."
+    descriptor, temporary = tempfile.mkstemp(prefix=".pathscope-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 def _looks_like_javascript(url: str, content_type: str) -> bool:
