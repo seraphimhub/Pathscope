@@ -23,6 +23,7 @@ Line/segment caps that apply before matching:
 | `_HEADER_LINE_RE` | error text | Linear in line length; header value intentionally consumes the rest of the line. | same |
 | `_AUTH_SCHEME_RE` | error text | Linear; token class is a single greedy run. | same |
 | `_ASSIGNMENT_RE` | error text | Linear; quoted alternatives cannot span newlines and the unquoted branch is a single run. | same |
+| `_QUERY_SECRET_RE` | URLs in findings/metadata/errors | Linear; anchored to `?`/`&` and stops at `&`/`#`. | [`test_credential_query_parameters_are_redacted`](../tests/unit/test_redaction.py) |
 
 Measured with a 250,000-character line: the whole `redact_text` call is
 ~0.03 s locally after the fix. Property tests additionally feed generated

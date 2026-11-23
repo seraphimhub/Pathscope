@@ -56,6 +56,12 @@ _ASSIGNMENT_RE = re.compile(
     r"""|password|passwd|pwd)\b(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&"']+)""",
 )
 
+# Query parameters are part of a URL finding/report, not just free-form text.
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|authorization"
+    r"|auth|password|passwd|secret|token)=)([^&#\s]*)"
+)
+
 
 def redact_url(value: str) -> str:
     """Return ``value`` with any URL userinfo removed.
@@ -74,10 +80,17 @@ def redact_url(value: str) -> str:
                 host = f"[{host}]"
             if parsed.port is not None:
                 host = f"{host}:{parsed.port}"
-            return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+            cleaned = urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+            return _redact_query_secrets(cleaned)
     except ValueError:
         pass
-    return _USERINFO_RE.sub(lambda match: match.group("scheme"), value)
+    fallback = _USERINFO_RE.sub(lambda match: match.group("scheme"), value)
+    return _redact_query_secrets(fallback)
+
+
+def _redact_query_secrets(url: str) -> str:
+    """Replace values of credential-like query parameters in ``url``."""
+    return _QUERY_SECRET_RE.sub(lambda match: f"{match.group(1)}{REDACTED}", url)
 
 
 def redact_text(value: str) -> str:

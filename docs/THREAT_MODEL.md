@@ -90,10 +90,11 @@ implemented.
    `--authorized-until` are operator-supplied strings. A malicious operator can
    claim any authorization; the log only shows what was claimed. Only a scope
    file adds host and validity structure, and it is still self-asserted.
-3. **Redaction is pattern-based.** Covered: URL userinfo, Authorization/Cookie/
-   Set-Cookie and common API-key headers, bearer/basic values, quoted/unquoted
-   `token`/`secret`/`password` assignments, percent-encoded and unicode values,
-   multi-line text. **Not covered:** base64 or encrypted transformations,
+3. **Redaction is pattern-based.** Covered: URL userinfo, credential-like URL
+   query parameters (`token`, `api_key`, `authorization`, `password`, …),
+   Authorization/Cookie/Set-Cookie and common API-key headers, bearer/basic
+   values, quoted/unquoted `token`/`secret`/`password` assignments,
+   percent-encoded and unicode values, multi-line text. **Not covered:** base64 or encrypted transformations,
    credentials split across lines, credentials embedded in prose with no
    sensitive key, custom header names not in the allowlist, and arbitrary
    binary encodings. Over-redaction (dropping the rest of a header line) is

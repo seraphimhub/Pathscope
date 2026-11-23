@@ -20,6 +20,14 @@ def test_url_without_userinfo_is_unchanged() -> None:
     assert redact_url(url) == url
 
 
+def test_credential_query_parameters_are_redacted() -> None:
+    cleaned = redact_url("https://example.com/callback?token=ZZSECRETQQ&x=1")
+    assert "ZZSECRETQQ" not in cleaned
+    assert "token=[REDACTED]" in cleaned
+    assert "x=1" in cleaned
+    assert "QWERTY" not in redact_url("https://example.com/?api_key=QWERTY&page=2")
+
+
 def test_malformed_url_still_loses_userinfo() -> None:
     redacted = redact_url("https://user:pass@example.com:notaport/x")
     assert "user" not in redacted

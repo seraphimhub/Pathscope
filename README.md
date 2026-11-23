@@ -340,9 +340,10 @@ detected. **Deleting the whole file or truncating the tail is not detectable**
 without an external anchor, and the log is not signed. The gate records
 attribution, not cryptographic proof of authorization.
 
-URL userinfo is removed from findings, errors, logs, `scan.json`, and the audit
-log. Header, cookie, bearer/basic, and token assignment values are replaced with
-`[REDACTED]` in free-form error text. Property tests generate credentials in
+URL userinfo and credential-like query parameters (`token`, `api_key`,
+`authorization`, `password`, …) are removed from findings, errors, logs,
+`scan.json`, and the audit log. Header, cookie, bearer/basic, and token
+assignment values are replaced with `[REDACTED]` in free-form error text. Property tests generate credentials in
 URL-encoded, quoted, unicode and multi-line forms; encodings that are not
 covered (base64/transformed secrets, secrets split across lines, bare prose)
 are listed in the threat model.

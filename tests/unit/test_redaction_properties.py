@@ -66,6 +66,14 @@ def test_url_userinfo_is_removed(secret: str) -> None:
     assert "example.com" in cleaned
 
 
+@given(SECRET)
+@settings(max_examples=80, deadline=None)
+def test_query_parameter_secret_is_removed(secret: str) -> None:
+    encoded = quote(f"ZZ{secret}QQ", safe="")
+    cleaned = redact_url(f"https://example.com/cb?access_token={encoded}&x=1")
+    assert encoded not in cleaned
+
+
 @given(UNICODE_SECRET)
 @settings(max_examples=80, deadline=None)
 def test_unicode_secret_never_leaks(secret: str) -> None:
