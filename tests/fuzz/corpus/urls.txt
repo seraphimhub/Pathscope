@@ -1,0 +1,8 @@
+http://example.com/
+https://user:pass@example.com/path?x=1#frag
+http://2130706433/
+http://0x7f000001:8080/
+http://[::1]/
+http://example.com:bad/
+javascript:alert(1)
+//example.com/protocol-relative

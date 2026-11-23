@@ -39,8 +39,28 @@ def normalize(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
-def extract_links(html: str, base_url: str, base_host: str) -> set[str]:
-    """Return normalized, in-scope http(s) URLs referenced by ``html``."""
+def extract_links(
+    html: str,
+    base_url: str,
+    base_host: str,
+    *,
+    max_links: int = 0,
+    max_url_length: int = 0,
+    max_query_variants: int = 0,
+    stats: dict[str, int] | None = None,
+) -> set[str]:
+    """Return normalized, in-scope http(s) URLs referenced by ``html``.
+
+    ``max_links`` bounds the returned set, ``max_url_length`` drops oversized
+    references, and ``max_query_variants`` bounds distinct queries per path
+    (the crawler-trap defense). Suppressed counts are added to ``stats`` when a
+    mapping is supplied; query strings are still discarded by ``normalize`` for
+    backward-compatible page identity.
+    """
+    if stats is None:
+        stats = {}
+    stats.setdefault("links_suppressed", 0)
+    stats.setdefault("query_variants_suppressed", 0)
     if not html or not base_url or not base_host:
         return set()
 
@@ -50,6 +70,28 @@ def extract_links(html: str, base_url: str, base_host: str) -> set[str]:
         return set()
 
     links: set[str] = set()
+    query_variants: dict[str, set[str]] = {}
+
+    def admit(resolved: str) -> None:
+        if max_url_length and len(resolved) > max_url_length:
+            stats["links_suppressed"] += 1
+            return
+        parsed = urlparse(resolved)
+        path = parsed.path or "/"
+        if parsed.query:
+            variants = query_variants.setdefault(path, set())
+            if parsed.query not in variants:
+                if max_query_variants and len(variants) >= max_query_variants:
+                    stats["query_variants_suppressed"] += 1
+                    return
+                variants.add(parsed.query)
+        normalized = normalize(resolved)
+        if normalized in links:
+            return
+        if max_links and len(links) >= max_links:
+            stats["links_suppressed"] += 1
+            return
+        links.add(normalized)
 
     for tag_name, attribute in _REFERENCE_ATTRS:
         for tag in soup.find_all(tag_name):
@@ -60,13 +102,13 @@ def extract_links(html: str, base_url: str, base_host: str) -> set[str]:
                 continue
             resolved = _resolve(raw, base_url, base_host)
             if resolved:
-                links.add(resolved)
+                admit(resolved)
 
             if tag_name in {"img", "source"}:
                 for candidate in _srcset_urls(tag.get("srcset")):
                     resolved = _resolve(candidate, base_url, base_host)
                     if resolved:
-                        links.add(resolved)
+                        admit(resolved)
 
     return links
 
@@ -88,7 +130,7 @@ def _resolve(raw: str, base_url: str, base_host: str) -> str | None:
     # normalized by core.security instead of being compared as raw strings here.
     if not host_in_scope(absolute, base_host):
         return None
-    return normalize(absolute)
+    return absolute
 
 
 def _srcset_urls(srcset: object) -> list[str]:

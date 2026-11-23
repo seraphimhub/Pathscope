@@ -23,12 +23,14 @@ _COMPILED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 _CATEGORY_BY_KEYWORD = {
     "api": "api_key",
     # These are detector category labels printed in findings, never credential
-    # values; bandit's B105 heuristic matches the words alone.
-    "secret": "secret",  # nosec B105
-    "token": "token",  # nosec B105
+    # values. Bandit's B105 heuristic only fired on earlier code shapes here, so
+    # the stale nosec markers were removed; `bandit --ignore-nosec` confirms no
+    # real finding is suppressed.
+    "secret": "secret",
+    "token": "token",
     "jwt": "jwt",
     "authorization": "authorization",
-    "password": "password",  # nosec B105
+    "password": "password",
 }
 
 _QUOTED_RE = re.compile(r"""(["'])([^"'\n]*)(\1)""")

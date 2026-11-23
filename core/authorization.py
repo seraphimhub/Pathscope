@@ -20,6 +20,7 @@ from typing import Any
 
 from core.exceptions import ConfigurationError
 from core.security import canonical_host, hostname_of
+from core.terminal import validate_identity
 
 _SCOPE_KEYS = frozenset(
     {"owner", "reference", "allowed_hosts", "not_before", "not_after", "description"}
@@ -136,6 +137,8 @@ def load_scope_file(path: str | Path, *, now: datetime | None = None) -> Authori
             f"{source}: 'reference' (ticket or approval) is required",
             details={"path": str(source)},
         )
+    validate_identity(owner, option=f"{source}: owner")
+    validate_identity(reference, option=f"{source}: reference")
 
     hosts = data.get("allowed_hosts")
     if not isinstance(hosts, list) or not hosts:
@@ -190,12 +193,30 @@ def _host_covered(host: str, allowed_hosts: tuple[str, ...]) -> bool:
     return False
 
 
+def _parse_authorized_until(value: str) -> datetime:
+    """Parse ``--authorized-until`` as an ISO-8601 instant (date is midnight)."""
+    candidate = (value or "").strip()
+    if not candidate:
+        raise ConfigurationError("--authorized-until must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfigurationError(
+            "--authorized-until must be an ISO-8601 timestamp",
+            details={"value": value},
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def resolve_authorization(
     *,
     target: str,
     authorized_by: str | None,
     scope_file: str | None,
     lab_mode: bool,
+    authorized_until: str | None = None,
     now: datetime | None = None,
 ) -> Authorization:
     """Return the authorization for this scan or raise ``ConfigurationError``."""
@@ -203,6 +224,26 @@ def resolve_authorization(
         raise ConfigurationError("--lab-mode cannot be combined with --scope-file")
     if lab_mode and authorized_by:
         raise ConfigurationError("--lab-mode cannot be combined with --authorized-by")
+    has_until = authorized_until is not None
+    if has_until and not authorized_by:
+        raise ConfigurationError("--authorized-until is only valid with --authorized-by")
+    if scope_file and has_until:
+        raise ConfigurationError(
+            "--authorized-until cannot be combined with --scope-file; "
+            "put not_after in the scope file instead"
+        )
+
+    until = (
+        _parse_authorized_until(authorized_until)
+        if has_until and authorized_until is not None
+        else None
+    )
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    if until is not None and current > until:
+        raise ConfigurationError(
+            f"authorization expired at {until.isoformat()}",
+            details={"authorized_until": until.isoformat()},
+        )
 
     if lab_mode:
         return Authorization(
@@ -224,10 +265,12 @@ def resolve_authorization(
         return authorization
 
     if authorized_by and authorized_by.strip():
+        validate_identity(authorized_by, option="--authorized-by")
         return Authorization(
             mode="authorized_by",
             owner=authorized_by.strip(),
             reference=authorized_by.strip(),
+            not_after=until,
             source="--authorized-by",
         )
 

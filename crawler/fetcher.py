@@ -17,7 +17,7 @@ from urllib.parse import urljoin
 import aiohttp
 
 from core.exceptions import FetchError
-from core.security import redirect_scheme_violation
+from core.security import canonicalize_request_url, redirect_scheme_violation
 
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
@@ -47,6 +47,7 @@ class FetchResult:
     content_type: str = ""
     redirects: tuple[str, ...] = field(default_factory=tuple)
     truncated: bool = False
+    decoded_bytes: int = 0
     retry_after: float | None = None
 
     @property
@@ -81,6 +82,7 @@ async def fetch_response(
     max_bytes: int = DEFAULT_MAX_BYTES,
     allow_redirect_to: Callable[[str], bool] | None = None,
     allow_scheme_downgrade: bool = False,
+    on_decoded_bytes: Callable[[int], int] | None = None,
 ) -> FetchResult:
     """Fetch ``url`` following at most ``max_redirects`` hops.
 
@@ -88,11 +90,14 @@ async def fetch_response(
     return False); the engine uses it to keep redirects inside the scan scope.
     Every hop is also checked for an https -> http downgrade, which would send
     session headers in cleartext; set ``allow_scheme_downgrade`` to opt in.
+    ``on_decoded_bytes`` receives the size of each decoded chunk and returns how
+    many bytes the caller allows; the engine uses it to enforce one global
+    download budget across concurrent workers without overshoot.
     """
     if session is None:
         return FetchResult(url=url)
 
-    current = url
+    current = canonicalize_request_url(url)
     chain: list[str] = []
     redirect_budget = max(0, max_redirects)
 
@@ -105,7 +110,7 @@ async def fetch_response(
             ) as resp:
                 location = resp.headers.get("Location")
                 if resp.status in REDIRECT_STATUSES and location:
-                    target = urljoin(current, location)
+                    target = canonicalize_request_url(urljoin(current, location))
                     if target in chain or target == current:
                         raise FetchError(current, reason="redirect loop detected")
                     scheme_violation = redirect_scheme_violation(
@@ -136,7 +141,7 @@ async def fetch_response(
                         retry_after=retry_after,
                     )
 
-                text, truncated = await _read_text(resp, max_bytes)
+                text, truncated, decoded_bytes = await _read_text(resp, max_bytes, on_decoded_bytes)
                 return FetchResult(
                     url=current,
                     status=resp.status,
@@ -144,6 +149,7 @@ async def fetch_response(
                     content_type=content_type,
                     redirects=tuple(chain),
                     truncated=truncated,
+                    decoded_bytes=decoded_bytes,
                     retry_after=retry_after,
                 )
         except aiohttp.ClientResponseError:
@@ -168,6 +174,7 @@ async def fetch(
     max_bytes: int = DEFAULT_MAX_BYTES,
     allow_redirect_to: Callable[[str], bool] | None = None,
     allow_scheme_downgrade: bool = False,
+    on_decoded_bytes: Callable[[int], int] | None = None,
 ) -> str:
     """Fetch a URL and return its text body (empty string for non-text/error)."""
     result = await fetch_response(
@@ -178,6 +185,7 @@ async def fetch(
         max_bytes=max_bytes,
         allow_redirect_to=allow_redirect_to,
         allow_scheme_downgrade=allow_scheme_downgrade,
+        on_decoded_bytes=on_decoded_bytes,
     )
     return result.text
 
@@ -207,10 +215,16 @@ def _for_status(status: int, text: str) -> str:
     return ""
 
 
-async def _read_text(resp: aiohttp.ClientResponse, max_bytes: int) -> tuple[str, bool]:
-    """Read at most ``max_bytes`` and decode leniently.
+async def _read_text(
+    resp: aiohttp.ClientResponse,
+    max_bytes: int,
+    on_decoded_bytes: Callable[[int], int] | None = None,
+) -> tuple[str, bool, int]:
+    """Read at most ``max_bytes`` of decoded bytes and decode leniently.
 
-    Returns ``(text, truncated)``.
+    aiohttp decompresses response bodies before ``resp.content`` yields them, so
+    the cap is applied to decoded bytes; a gzip bomb cannot bypass it by
+    declaring a tiny compressed size. Returns ``(text, truncated, decoded)``.
     """
     chunks: list[bytes] = []
     total = 0
@@ -224,22 +238,28 @@ async def _read_text(resp: aiohttp.ClientResponse, max_bytes: int) -> tuple[str,
             if remaining <= 0:
                 truncated = True
                 break
-            if len(chunk) > remaining:
-                chunks.append(chunk[:remaining])
-                total += remaining
+            candidate = chunk[:remaining]
+            if on_decoded_bytes is not None:
+                granted = max(0, min(len(candidate), on_decoded_bytes(len(candidate))))
+            else:
+                granted = len(candidate)
+            if granted <= 0:
                 truncated = True
                 break
-            chunks.append(chunk)
-            total += len(chunk)
+            chunks.append(candidate[:granted])
+            total += granted
+            if granted < len(chunk) or len(chunk) > remaining:
+                truncated = True
+                break
     except Exception:
-        return "", False
+        return "", False, 0
 
     raw = b"".join(chunks)
     if not raw:
-        return "", truncated
+        return "", truncated, total
 
     encoding = resp.charset or "utf-8"
     try:
-        return raw.decode(encoding, errors="ignore"), truncated
+        return raw.decode(encoding, errors="ignore"), truncated, total
     except LookupError:
-        return raw.decode("utf-8", errors="ignore"), truncated
+        return raw.decode("utf-8", errors="ignore"), truncated, total

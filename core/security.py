@@ -18,7 +18,7 @@ needs the HTTP client's resolver interface.
 from __future__ import annotations
 
 import ipaddress
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from core.exceptions import ScopeViolationError
 
@@ -111,6 +111,39 @@ def canonical_host(host: str) -> str:
         # Unmappable names keep their raw form: they simply will not match a
         # scope entry, which fails closed.
         return candidate
+
+
+def canonicalize_request_url(url: str) -> str:
+    """Rewrite legacy numeric IPv4 hosts to dotted-quad before the HTTP layer.
+
+    ``ipaddress``/``urllib`` do not canonicalize ``2130706433`` or ``127.1`` in
+    a URL, and ``yarl`` (aiohttp's URL type) rejects them. The policy layer
+    already agrees with the kernel on what those spellings mean, so the request
+    URL is rewritten to the address that would be dialed instead of refusing a
+    target the operator explicitly supplied. Invalid URLs are returned
+    unchanged and will be rejected by the normal policy/fetch path.
+    """
+    if not url:
+        return url
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or ""
+        if not host:
+            return url
+        legacy = _legacy_ipv4_value(host)
+        if legacy is None or legacy == host.lower():
+            return url
+        port = parsed.port
+    except (ValueError, UnicodeError):
+        return url
+
+    raw_netloc = parsed.netloc
+    userinfo, separator, _ = raw_netloc.rpartition("@")
+    prefix = userinfo + separator if separator else ""
+    hostport = legacy if port is None else f"{legacy}:{port}"
+    return urlunsplit(
+        (parsed.scheme, prefix + hostport, parsed.path, parsed.query, parsed.fragment)
+    )
 
 
 def hostname_of(url: str) -> str:

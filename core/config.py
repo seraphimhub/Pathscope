@@ -30,6 +30,10 @@ INT_OPTIONS: dict[str, tuple[int, int]] = {
     "max_pages": (1, 1_000_000),
     "max_redirects": (0, 50),
     "max_retries": (0, 10),
+    "max_total_bytes": (1024, 1_000_000_000),
+    "max_links_per_page": (1, 100_000),
+    "max_url_length": (16, 1_000_000),
+    "max_query_variants": (1, 10_000),
 }
 
 FLOAT_OPTIONS: dict[str, tuple[float, float]] = {
@@ -38,12 +42,21 @@ FLOAT_OPTIONS: dict[str, tuple[float, float]] = {
     "delay": (0.0, 60.0),
     "jitter": (0.0, 60.0),
     "max_error_rate": (0.0, 1.0),
+    "max_time": (0.0, 86_400.0),
 }
 
 ROBOTS_POLICIES = frozenset({"off", "report", "respect"})
 
 BOOL_OPTIONS = frozenset(
-    {"secrets", "endpoints", "js", "block_private", "allow_scheme_downgrade", "lab_mode"}
+    {
+        "secrets",
+        "endpoints",
+        "js",
+        "block_private",
+        "allow_scheme_downgrade",
+        "lab_mode",
+        "insecure",
+    }
 )
 
 STR_OPTIONS = frozenset(
@@ -55,10 +68,12 @@ STR_OPTIONS = frozenset(
         "auth",
         "output_dir",
         "authorized_by",
+        "authorized_until",
         "scope_file",
         "user_agent",
         "scan_id",
         "robots",
+        "ca_bundle",
     }
 )
 
@@ -196,6 +211,12 @@ def validate_scan_options(options: dict[str, Any]) -> dict[str, Any]:
     user_agent = cleaned.get("user_agent")
     if user_agent is not None and not str(user_agent).strip():
         raise ConfigurationError("user_agent must not be empty", details={"option": "user_agent"})
+
+    ca_bundle = cleaned.get("ca_bundle")
+    if ca_bundle is not None and not str(ca_bundle).strip():
+        raise ConfigurationError("ca_bundle must not be empty", details={"option": "ca_bundle"})
+    if cleaned.get("insecure") and ca_bundle:
+        raise ConfigurationError("--insecure and --ca-bundle cannot be combined")
 
     return cleaned
 

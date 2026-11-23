@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head>
+<base href="http://example.com/base/">
+<script>fetch("/api/v1/" + "users"); var token = "EXAMPLE";</script>
+</head><body>
+<a href="/a">a</a>
+<a href="//evil.test/out">out</a>
+<a href="https://example.com@evil.test/">userinfo</a>
+<a href="/search?q=1&amp;page=2">q</a>
+<img srcset="/a.png 1x, /b.png 2x">
+<div title="\u001b[31m">control</div>
+</body></html>

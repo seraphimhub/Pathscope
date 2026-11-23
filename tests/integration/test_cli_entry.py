@@ -35,6 +35,7 @@ def test_cli_accepts_required_kwargs() -> None:
         "block_private",
         "allow_scheme_downgrade",
         "authorized_by",
+        "authorized_until",
         "scope_file",
         "lab_mode",
         "rps",
@@ -45,6 +46,13 @@ def test_cli_accepts_required_kwargs() -> None:
         "user_agent",
         "scan_id",
         "robots",
+        "max_total_bytes",
+        "max_time",
+        "max_links_per_page",
+        "max_url_length",
+        "max_query_variants",
+        "insecure",
+        "ca_bundle",
         "explicit",
     ]
     assert params == expected

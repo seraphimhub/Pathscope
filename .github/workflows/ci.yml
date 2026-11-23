@@ -37,7 +37,7 @@ jobs:
 
       - name: Install dev tooling
         run: |
-          python -m pip install --upgrade pytest pytest-asyncio pytest-cov ruff mypy bandit pyyaml
+          python -m pip install --upgrade pytest pytest-asyncio pytest-cov ruff mypy bandit pyyaml hypothesis
 
       - name: Validate imports
         run: |
@@ -103,7 +103,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          python -m pip install --upgrade pytest pytest-asyncio pytest-cov ruff mypy bandit pyyaml
+          python -m pip install --upgrade pytest pytest-asyncio pytest-cov ruff mypy bandit pyyaml hypothesis
 
       - name: Smoke test imports
         run: |

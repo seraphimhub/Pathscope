@@ -34,8 +34,11 @@ SENSITIVE_HEADERS = frozenset(
     }
 )
 
+# The lookbehind prevents the engine from retrying the scheme at every
+# character of a long word (e.g. 250k 'A's), which made this pattern quadratic.
+# Scheme length is capped at the RFC maximum we could ever need.
 _USERINFO_RE = re.compile(
-    r"(?P<scheme>[a-z][a-z0-9+.-]*://)(?P<userinfo>[^/\s?#@]+)@",
+    r"(?<![\w+.-])(?P<scheme>[a-z][a-z0-9+.-]{0,31}://)(?P<userinfo>[^/\s?#@]+)@",
     re.IGNORECASE,
 )
 

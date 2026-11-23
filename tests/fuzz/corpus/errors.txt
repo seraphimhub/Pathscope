@@ -1,0 +1,5 @@
+Fetch failed for https://user:password@example.com/private
+Authorization: Bearer FAKE-TOKEN-EXAMPLE
+Cookie: session=FAKE-TOKEN-EXAMPLE; theme=dark
+token=FAKE-TOKEN-EXAMPLE
+redirect to https://svc:hunter2@other.example/

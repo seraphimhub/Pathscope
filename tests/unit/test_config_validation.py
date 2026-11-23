@@ -116,6 +116,15 @@ def test_numeric_strings_are_coerced() -> None:
         {"user_agent": "   "},
         {"lab_mode": "maybe"},
         {"authorized_by": 123},
+        {"authorized_until": 123},
+        {"max_total_bytes": 0},
+        {"max_time": -1},
+        {"max_links_per_page": 0},
+        {"max_url_length": 10},
+        {"max_query_variants": 0},
+        {"insecure": "maybe"},
+        {"ca_bundle": 42},
+        {"insecure": True, "ca_bundle": "ca.pem"},
     ],
 )
 def test_invalid_options_are_rejected(options: dict[str, object]) -> None:
@@ -141,6 +150,24 @@ def test_safe_operation_options_are_normalized() -> None:
     assert cleaned["robots"] == "respect"
     assert cleaned["lab_mode"] is True
     assert cleaned["max_retries"] == 3
+
+
+def test_hostile_input_and_tls_options_are_normalized() -> None:
+    cleaned = validate_scan_options(
+        {
+            "max_total_bytes": "50000000",
+            "max_time": 120,
+            "max_links_per_page": "500",
+            "max_url_length": 2048,
+            "max_query_variants": 25,
+            "insecure": "no",
+            "ca_bundle": "ca.pem",
+        }
+    )
+    assert cleaned["max_total_bytes"] == 50_000_000
+    assert cleaned["max_links_per_page"] == 500
+    assert cleaned["insecure"] is False
+    assert cleaned["ca_bundle"] == "ca.pem"
 
 
 def test_unknown_keys_are_preserved_for_forward_compatibility() -> None:

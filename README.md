@@ -42,7 +42,10 @@ flowchart TD
 *  Optional private/loopback/metadata address guard enforced at DNS resolution
 *  Redirect chain following with loop detection and hop limits
 *  Per-URL error isolation (one failure never aborts the scan)
-*  Response size caps and non-text content rejection
+*  Response, whole-scan, time, link and URL budgets (clean stops, recorded)
+*  TLS verification on by default, with recorded `--insecure`/`--ca-bundle`
+*  Tamper-evident hash-chained audit log and `audit verify`
+*  Terminal/control-character sanitization and header-injection rejection
 *  Structured, de-duplicated JSON findings
 
 ---
@@ -50,7 +53,7 @@ flowchart TD
 ## Terminal Preview
 
 ```bash id="83x5dm"
-$ python3 cli.py --target https://example.com --depth 3 --workers 8
+$ python3 cli.py --target https://example.com --authorized-by "TICKET-42" --depth 3 --workers 8
 
 ███████╗███████╗██████╗  █████╗ ██████╗ ██╗  ██╗██╗███╗   ███╗
 ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔══██╗██║  ██║██║████╗ ████║
@@ -142,6 +145,7 @@ python3 cli.py --target http://127.0.0.1:8080 --lab-mode --depth 2
 --api VALUE               API key or JSON token for auth
 --auth VALUE              auth profile or token
 --authorized-by TEXT      who authorized the scan (required unless lab mode)
+--authorized-until ISO    optional expiry; expired scans are refused
 --scope-file PATH         YAML file: owner, reference, allowed_hosts, validity
 --lab-mode                no external authorization; local host you own only
 --rps N                   maximum request starts per second (0 = unlimited)
@@ -153,6 +157,13 @@ python3 cli.py --target http://127.0.0.1:8080 --lab-mode --depth 2
 --scan-id TEXT            optional X-Pathscope-Scan-Id correlation header
 --robots [off|report|respect]
                           robots.txt policy (default off)
+--max-total-bytes N       decoded download budget for the whole scan
+--max-time SECONDS        wall-clock scan budget (0 disables)
+--max-links-per-page N    links accepted from one page (default 1000)
+--max-url-length N        maximum accepted URL length (default 2048)
+--max-query-variants N    distinct query variants per path (default 50)
+--insecure                disable TLS verification (loud, recorded; testing only)
+--ca-bundle PATH          PEM CA bundle used as the trust store for the target
 --config PATH             YAML config file
 --quiet                   suppress the summary
 --json                    emit a machine-readable summary to stdout
@@ -246,6 +257,11 @@ not-yet-valid window, and a target host that the file does not cover.
 host you own and is recorded as such. The decision appears in `scan.json`
 (`authorization`) and in the audit log.
 
+`--authorized-by` accepts an optional `--authorized-until <ISO-8601>`; an
+expired value refuses the scan and a missing one prints a warning. **The gate
+records attribution, not proof.** A scope file adds host coverage and validity
+structure, but both are self-asserted by the operator.
+
 ### Rate control, retries and circuit breaker
 
 `--rps`, `--delay` and `--jitter` share one schedule across all workers, so
@@ -256,6 +272,43 @@ at least 20 attempts have been made, an error rate above `--max-error-rate`
 (transport errors, 5xx, and retried throttling) opens a circuit breaker: queued
 URLs are dropped, the reason is logged, audited, and written to
 `scan.json.circuit_breaker`.
+
+### Resource and classifier budgets
+
+A scanned site is untrusted, so every unbounded quantity has a cap:
+
+```bash
+python3 cli.py --target https://example.com --authorized-by T-42 \
+  --max-total-bytes 50000000 --max-time 300 \
+  --max-links-per-page 1000 --max-url-length 2048 --max-query-variants 50
+```
+
+The per-response cap (`DEFAULT_MAX_BYTES`, 2,000,000) applies to **decoded**
+bytes, so a small gzip body cannot expand past it. The whole-scan budget is
+claimed chunk by chunk and is exact even with concurrent workers. Hitting the
+byte or time budget stops the scan cleanly: `scan.json` gets `stop_reason`, and
+the audit log gets a `budget_exhausted` event. Page/link/URL/query caps truncate
+the current page instead, are counted in `scan.json.budgets`, and are audited
+once. The crawler-trap defense is documented in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
+and measured in `tests/security/test_resource_budgets.py`.
+
+### TLS
+
+Certificate verification is on by default and a self-signed server fails with a
+clear error instead of silently crawling. `--ca-bundle PATH` adds an explicit
+PEM trust anchor; `--insecure` disables verification, prints a loud warning,
+and is recorded in `scan.json.tls` and the audit log. Scope, scheme and
+`SafeResolver` checks remain active in every TLS mode.
+
+### Hostile operator input
+
+Header names and values, cookies, `--user-agent`, and `--scan-id` are checked
+before a request: CR/LF and all C0/C1 controls are rejected as possible header
+injection. Target-derived strings printed to the console, logs, audit entries,
+findings, or JSON are stripped of ANSI/OSC escapes and control characters.
+Output directories with `..` or that are symlinks are refused; the audit file is
+opened `O_NOFOLLOW`, and JSON outputs are atomically replaced and verified to be
+regular files owned by the current user.
 
 ### robots.txt
 
@@ -273,13 +326,26 @@ correlate traffic, and is also recorded in metadata and the audit log.
 ### Audit log and redaction
 
 `<output_dir>/audit.jsonl` is append-only JSON lines (`0600`) recording scan
-start/stop, authorization, a SHA-256 hash of the effective configuration, every
-refused request with its stage and reason, retries, and circuit-breaker events.
+start/stop, authorization, TLS mode, a SHA-256 hash of the effective
+configuration, every refused request with its stage and reason, retries,
+circuit-breaker events, budget stops, and stop reasons. Each line carries
+`prev_hash` and `hash`, forming a chain:
+
+```bash
+python3 cli.py audit verify output/audit.jsonl
+```
+
+The verifier reports the first broken line; edits and deleted middle lines are
+detected. **Deleting the whole file or truncating the tail is not detectable**
+without an external anchor, and the log is not signed. The gate records
+attribution, not cryptographic proof of authorization.
 
 URL userinfo is removed from findings, errors, logs, `scan.json`, and the audit
 log. Header, cookie, bearer/basic, and token assignment values are replaced with
-`[REDACTED]` in free-form error text. This is covered by unit tests with
-crafted exception strings, not only by code review.
+`[REDACTED]` in free-form error text. Property tests generate credentials in
+URL-encoded, quoted, unicode and multi-line forms; encodings that are not
+covered (base64/transformed secrets, secrets split across lines, bare prose)
+are listed in the threat model.
 
 ---
 
@@ -290,6 +356,9 @@ fetcher, and every URL source (links, JavaScript, redirects):
 
 * hosts are canonicalized (IDNA, trailing dot, default port, IPv6 brackets)
   before comparison, so `https://example.com./` cannot slip past scope checks;
+* legacy numeric IPv4 spellings (`2130706433`, `0x7f000001`, `127.1`) are
+  canonicalized to dotted-quad before aiohttp/yarl sees the URL, so policy,
+  scope and the socket agree and the scan works instead of failing inside yarl;
 * the scope is an exact host match (with the default port normalized), so
   unrelated hosts, other ports, and subdomains such as `admin.example.com` are
   dropped even when reachable — the policy supports an explicit subdomain
@@ -359,6 +428,9 @@ levels within one run rather than quoting absolute numbers.
 python -m pytest tests/ --strict-markers -q
 ```
 
+The property tests require `hypothesis` (`pip install hypothesis`); CI installs
+it alongside the other development tooling.
+
 Beyond unit and integration tests, the suite includes:
 
 * `tests/security/test_ssrf_and_scope_bypass.py` — address classification,
@@ -377,7 +449,17 @@ Beyond unit and integration tests, the suite includes:
 * `tests/unit/test_throttle.py`, `tests/unit/test_robots.py`, and
   `tests/crawler/test_engine_safe_operations.py` — pacing, Retry-After, circuit
   breaking, robots policy, audit log integrity, identity headers, and redaction
-  of persisted output.
+  of persisted output;
+* `tests/security/test_resource_budgets.py` — decoded gzip cap, total/time/page/
+  link/query budgets, crawler trap termination, clean stop reasons;
+* `tests/security/test_tls.py` — verification default, CA bundle, recorded
+  `--insecure`, and scope checks in every TLS mode;
+* `tests/security/test_terminal_and_output.py` — ANSI/OSC stripping, header
+  injection, traversal/symlink refusal;
+* `tests/unit/test_audit_chain.py` and `tests/unit/test_regex_safety.py` —
+  hash-chain tamper detection and adversarial regex timings;
+* `tests/unit/test_redaction_properties.py` and `tests/fuzz/corpus/` — credential
+  property tests and the committed fuzz corpus (Hypothesis).
 
 ---
 
@@ -390,7 +472,8 @@ Pathscope/
 ├── crawler/            # engine, fetcher, HTML/JS parser
 ├── scanners/           # endpoint and secret-pattern scanners
 ├── benchmarks/         # reproducible crawler benchmark harness
-├── tests/              # unit, integration, security tests and fixtures
+├── docs/               # threat model and regex inventory
+├── tests/              # unit, integration, security, fuzz corpus and fixtures
 ├── output/             # default findings.json destination
 ├── requirements.txt
 └── .github/workflows/ci.yml
@@ -410,7 +493,8 @@ Jobs:
 
 * `quality` on Python 3.11, 3.12 and 3.13 — import validation, `ruff check .`,
   `ruff format --check .`, `mypy` on `core`, `crawler`, `scanners`, `bandit`
-  static scan, the full `pytest` suite, and a coverage report
+  static scan, the full `pytest` suite (including Hypothesis property tests),
+  and a coverage report
 * `smoke` — boots the CLI and verifies the public surface still imports and runs
 * a guard that rejects known secret patterns (AWS key shape, fake test tokens)
   in tracked files
@@ -439,10 +523,14 @@ Pathscope must only be used for:
 
 Always maintain:
 
-* safe concurrency
-* documented authorization
+* safe concurrency and the resource budgets
+* documented authorization (the gate records attribution, not proof)
 * operational awareness
 * production-safe rate controls
+* TLS verification unless you explicitly accept and record the risk
+
+Security design and residual risks: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+Regex/parser bounds: [docs/REGEX_INVENTORY.md](docs/REGEX_INVENTORY.md).
 
 ---
 

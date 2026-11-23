@@ -152,3 +152,54 @@ def test_scope_file_rejects_missing_fields_and_unknown_keys(tmp_path: Path) -> N
 def test_scope_file_must_exist(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError):
         load_scope_file(tmp_path / "absent.yaml", now=NOW)
+
+
+def test_authorized_until_is_recorded() -> None:
+    authorization = resolve_authorization(
+        target="https://example.com",
+        authorized_by="AppSec",
+        scope_file=None,
+        lab_mode=False,
+        authorized_until="2026-07-01T00:00:00Z",
+        now=NOW,
+    )
+    assert authorization.not_after == datetime(2026, 7, 1, tzinfo=UTC)
+    assert authorization.to_metadata()["not_after"] == "2026-07-01T00:00:00+00:00"
+
+
+def test_expired_authorized_until_is_refused() -> None:
+    with pytest.raises(ConfigurationError) as excinfo:
+        resolve_authorization(
+            target="https://example.com",
+            authorized_by="AppSec",
+            scope_file=None,
+            lab_mode=False,
+            authorized_until="2026-05-31T00:00:00Z",
+            now=NOW,
+        )
+    assert "expired" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", ["tomorrow", "", "2026-13-01"])
+def test_invalid_authorized_until_is_refused(value: str) -> None:
+    with pytest.raises(ConfigurationError):
+        resolve_authorization(
+            target="https://example.com",
+            authorized_by="AppSec",
+            scope_file=None,
+            lab_mode=False,
+            authorized_until=value,
+            now=NOW,
+        )
+
+
+def test_authorized_until_without_authorized_by_is_refused() -> None:
+    with pytest.raises(ConfigurationError):
+        resolve_authorization(
+            target="https://example.com",
+            authorized_by=None,
+            scope_file=None,
+            lab_mode=True,
+            authorized_until="2026-07-01T00:00:00Z",
+            now=NOW,
+        )

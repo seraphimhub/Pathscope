@@ -18,13 +18,28 @@ from typing import Any
 
 import click
 
+from core.audit import verify_audit_file
 from core.authorization import resolve_authorization
 from core.banner import BANNER
 from core.config import load_config_from_file, merge_cli_options
-from core.exceptions import PathscopeError
+from core.exceptions import ConfigurationError, PathscopeError
 from core.redaction import redact_text, redact_url
+from core.terminal import (
+    sanitize_terminal,
+    validate_identity,
+    validate_output_dir,
+    validate_request_headers,
+)
 from core.version import DEFAULT_USER_AGENT
-from crawler.engine import DEFAULT_MAX_PAGES, Engine
+from crawler.engine import (
+    DEFAULT_MAX_LINKS_PER_PAGE,
+    DEFAULT_MAX_PAGES,
+    DEFAULT_MAX_QUERY_VARIANTS,
+    DEFAULT_MAX_TIME,
+    DEFAULT_MAX_TOTAL_BYTES,
+    DEFAULT_MAX_URL_LENGTH,
+    Engine,
+)
 from crawler.fetcher import DEFAULT_MAX_REDIRECTS, DEFAULT_TIMEOUT
 
 OUTPUT_DIR = os.environ.get("PATHSCOPE_OUTPUT_DIR", "output")
@@ -136,6 +151,7 @@ async def _run_cli(
     block_private: bool = False,
     allow_scheme_downgrade: bool = False,
     authorized_by: str | None = None,
+    authorized_until: str | None = None,
     scope_file: str | None = None,
     lab_mode: bool = False,
     rps: float = 0.0,
@@ -146,6 +162,13 @@ async def _run_cli(
     user_agent: str = DEFAULT_USER_AGENT,
     scan_id: str = "",
     robots: str = "off",
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_time: float = DEFAULT_MAX_TIME,
+    max_links_per_page: int = DEFAULT_MAX_LINKS_PER_PAGE,
+    max_url_length: int = DEFAULT_MAX_URL_LENGTH,
+    max_query_variants: int = DEFAULT_MAX_QUERY_VARIANTS,
+    insecure: bool = False,
+    ca_bundle: str | None = None,
     explicit: dict[str, Any] | None = None,
 ) -> int:
     """Run one Pathscope scan using the resolved CLI + config + env values."""
@@ -178,6 +201,7 @@ async def _run_cli(
         "block_private": block_private,
         "allow_scheme_downgrade": allow_scheme_downgrade,
         "authorized_by": authorized_by,
+        "authorized_until": authorized_until,
         "scope_file": scope_file,
         "lab_mode": lab_mode,
         "rps": rps,
@@ -188,13 +212,20 @@ async def _run_cli(
         "user_agent": user_agent,
         "scan_id": scan_id,
         "robots": robots,
+        "max_total_bytes": max_total_bytes,
+        "max_time": max_time,
+        "max_links_per_page": max_links_per_page,
+        "max_url_length": max_url_length,
+        "max_query_variants": max_query_variants,
+        "insecure": insecure,
+        "ca_bundle": ca_bundle,
     }
 
     try:
         config_values = load_config_from_file(config, strict=True) if config else {}
         merged = merge_cli_options(defaults, config_values, explicit)
     except PathscopeError as exc:
-        click.echo(f"\n[!] Configuration error: {exc}")
+        click.echo(f"\n[!] Configuration error: {sanitize_terminal(redact_text(str(exc)))}")
         return 2
 
     if config and not quiet:
@@ -217,6 +248,7 @@ async def _run_cli(
     block_private = bool(merged["block_private"])
     allow_scheme_downgrade = bool(merged["allow_scheme_downgrade"])
     authorized_by = merged.get("authorized_by")
+    authorized_until = merged.get("authorized_until")
     scope_file = merged.get("scope_file")
     lab_mode = bool(merged["lab_mode"])
     rps = float(merged["rps"])
@@ -227,6 +259,13 @@ async def _run_cli(
     user_agent = str(merged.get("user_agent") or DEFAULT_USER_AGENT)
     scan_id = str(merged.get("scan_id") or "")
     robots = str(merged.get("robots") or "off")
+    max_total_bytes = int(merged["max_total_bytes"])
+    max_time = float(merged["max_time"])
+    max_links_per_page = int(merged["max_links_per_page"])
+    max_url_length = int(merged["max_url_length"])
+    max_query_variants = int(merged["max_query_variants"])
+    insecure = bool(merged["insecure"])
+    ca_bundle = str(merged["ca_bundle"]) if merged.get("ca_bundle") else None
 
     try:
         authorization = resolve_authorization(
@@ -234,6 +273,7 @@ async def _run_cli(
             authorized_by=str(authorized_by) if authorized_by else None,
             scope_file=str(scope_file) if scope_file else None,
             lab_mode=lab_mode,
+            authorized_until=str(authorized_until) if authorized_until else None,
         )
     except PathscopeError as exc:
         click.echo(f"\n[!] Authorization error: {redact_text(str(exc))}")
@@ -249,30 +289,61 @@ async def _run_cli(
     if scan_id and not any(name.lower() == "x-pathscope-scan-id" for name in request_headers):
         request_headers["X-Pathscope-Scan-Id"] = scan_id
 
-    runner = Engine(
-        start_url=str(resolved_target),
-        depth=depth,
-        workers=workers,
-        timeout=float(timeout),
-        max_pages=int(max_pages),
-        max_redirects=int(max_redirects),
-        headers=request_headers,
-        block_private=block_private,
-        scan_secrets_enabled=secrets,
-        scan_endpoints_enabled=endpoints,
-        scan_js=js,
-        allow_scheme_downgrade=allow_scheme_downgrade,
-        robots_policy=robots,
-        rps=rps,
-        delay=delay,
-        jitter=jitter,
-        max_retries=max_retries,
-        max_error_rate=max_error_rate,
-        scan_id=scan_id,
-        user_agent=user_agent,
-        authorization=authorization.to_metadata(),
-        output_dir=output_dir,
-    )
+    try:
+        output_dir = validate_output_dir(output_dir)
+        validate_request_headers(request_headers)
+        validate_identity(user_agent, option="user_agent")
+        validate_identity(scan_id, option="scan_id")
+    except ConfigurationError as exc:
+        click.echo(f"\n[!] Configuration error: {sanitize_terminal(redact_text(str(exc)))}")
+        return 2
+
+    if authorization.mode == "authorized_by" and authorization.not_after is None:
+        click.echo(
+            "[!] Warning: running without --authorized-until, so --authorized-by "
+            "has no validity period; add an expiry for a time-bound authorization."
+        )
+    if insecure:
+        click.echo(
+            "[!] WARNING: TLS certificate verification is disabled by --insecure; "
+            "traffic can be intercepted. This is recorded in scan.json and the audit log."
+        )
+
+    try:
+        runner = Engine(
+            start_url=str(resolved_target),
+            depth=depth,
+            workers=workers,
+            timeout=float(timeout),
+            max_pages=int(max_pages),
+            max_redirects=int(max_redirects),
+            headers=request_headers,
+            block_private=block_private,
+            scan_secrets_enabled=secrets,
+            scan_endpoints_enabled=endpoints,
+            scan_js=js,
+            allow_scheme_downgrade=allow_scheme_downgrade,
+            robots_policy=robots,
+            rps=rps,
+            delay=delay,
+            jitter=jitter,
+            max_retries=max_retries,
+            max_error_rate=max_error_rate,
+            scan_id=scan_id,
+            user_agent=user_agent,
+            authorization=authorization.to_metadata(),
+            max_total_bytes=max_total_bytes,
+            max_time=max_time,
+            max_links_per_page=max_links_per_page,
+            max_url_length=max_url_length,
+            max_query_variants=max_query_variants,
+            insecure=insecure,
+            ca_bundle=ca_bundle,
+            output_dir=output_dir,
+        )
+    except ConfigurationError as exc:
+        click.echo(f"\n[!] Configuration error: {sanitize_terminal(redact_text(str(exc)))}")
+        return 2
 
     try:
         if not quiet:
@@ -283,7 +354,7 @@ async def _run_cli(
         click.echo("\n[!] Scan stopped safely.")
         return 0
     except PathscopeError as exc:
-        click.echo(f"\n[!] Scan failed: {redact_text(str(exc))}")
+        click.echo(f"\n[!] Scan failed: {sanitize_terminal(redact_text(str(exc)))}")
         return 2
 
     discovered = len(runner.discovered_urls)
@@ -315,7 +386,7 @@ async def _run_cli(
         click.echo(
             json.dumps(
                 {
-                    "target": redact_url(str(resolved_target)),
+                    "target": sanitize_terminal(redact_url(str(resolved_target))),
                     "discovered": discovered,
                     "pages": runner.pages_fetched,
                     "requests": requests_made,
@@ -418,6 +489,12 @@ TARGET_OPTION = click.option(
     help="Who authorized this scan (recorded in scan.json and the audit log).",
 )
 @click.option(
+    "--authorized-until",
+    "authorized_until",
+    default=None,
+    help="ISO-8601 expiry for --authorized-by; expired scans are refused.",
+)
+@click.option(
     "--scope-file",
     "scope_file",
     default=None,
@@ -463,6 +540,59 @@ TARGET_OPTION = click.option(
     default="off",
     help="robots.txt policy: ignore, report refusals, or respect them.",
 )
+@click.option(
+    "--max-total-bytes",
+    "max_total_bytes",
+    default=DEFAULT_MAX_TOTAL_BYTES,
+    type=int,
+    show_default=True,
+    help="Maximum decoded bytes downloaded across the whole scan.",
+)
+@click.option(
+    "--max-time",
+    "max_time",
+    default=DEFAULT_MAX_TIME,
+    type=float,
+    show_default=True,
+    help="Maximum wall-clock seconds for the scan (0 disables the deadline).",
+)
+@click.option(
+    "--max-links-per-page",
+    "max_links_per_page",
+    default=DEFAULT_MAX_LINKS_PER_PAGE,
+    type=int,
+    show_default=True,
+    help="Maximum links accepted from one page.",
+)
+@click.option(
+    "--max-url-length",
+    "max_url_length",
+    default=DEFAULT_MAX_URL_LENGTH,
+    type=int,
+    show_default=True,
+    help="Maximum accepted URL length in characters.",
+)
+@click.option(
+    "--max-query-variants",
+    "max_query_variants",
+    default=DEFAULT_MAX_QUERY_VARIANTS,
+    type=int,
+    show_default=True,
+    help="Maximum distinct query variants kept per path.",
+)
+@click.option(
+    "--insecure",
+    "insecure",
+    is_flag=True,
+    default=False,
+    help="Disable TLS verification (loud, recorded; testing only).",
+)
+@click.option(
+    "--ca-bundle",
+    "ca_bundle",
+    default=None,
+    help="PEM CA bundle used as the TLS trust store for this scan.",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -487,6 +617,7 @@ def cli(
     block_private: bool,
     allow_scheme_downgrade: bool,
     authorized_by: str | None,
+    authorized_until: str | None,
     scope_file: str | None,
     lab_mode: bool,
     rps: float,
@@ -497,6 +628,13 @@ def cli(
     user_agent: str,
     scan_id: str,
     robots: str,
+    max_total_bytes: int,
+    max_time: float,
+    max_links_per_page: int,
+    max_url_length: int,
+    max_query_variants: int,
+    insecure: bool,
+    ca_bundle: str | None,
 ) -> None:
     """Pathscope: professional web discovery and attack surface intelligence."""
     explicit = {
@@ -519,6 +657,7 @@ def cli(
             "block_private": block_private,
             "allow_scheme_downgrade": allow_scheme_downgrade,
             "authorized_by": authorized_by,
+            "authorized_until": authorized_until,
             "scope_file": scope_file,
             "lab_mode": lab_mode,
             "rps": rps,
@@ -529,6 +668,13 @@ def cli(
             "user_agent": user_agent,
             "scan_id": scan_id,
             "robots": robots,
+            "max_total_bytes": max_total_bytes,
+            "max_time": max_time,
+            "max_links_per_page": max_links_per_page,
+            "max_url_length": max_url_length,
+            "max_query_variants": max_query_variants,
+            "insecure": insecure,
+            "ca_bundle": ca_bundle,
         }.items()
         if ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
     }
@@ -556,6 +702,7 @@ def cli(
                 block_private=block_private,
                 allow_scheme_downgrade=allow_scheme_downgrade,
                 authorized_by=authorized_by,
+                authorized_until=authorized_until,
                 scope_file=scope_file,
                 lab_mode=lab_mode,
                 rps=rps,
@@ -566,11 +713,41 @@ def cli(
                 user_agent=user_agent,
                 scan_id=scan_id,
                 robots=robots,
+                max_total_bytes=max_total_bytes,
+                max_time=max_time,
+                max_links_per_page=max_links_per_page,
+                max_url_length=max_url_length,
+                max_query_variants=max_query_variants,
+                insecure=insecure,
+                ca_bundle=ca_bundle,
                 explicit=explicit,
             )
         )
     )
 
 
+@click.group()
+def audit() -> None:
+    """Inspect Pathscope governance artifacts."""
+
+
+@audit.command("verify")
+@click.argument("path", type=click.Path(dir_okay=False))
+def audit_verify(path: str) -> None:
+    """Verify the hash chain of an audit.jsonl file."""
+    result = verify_audit_file(path)
+    if result.valid:
+        click.echo(f"OK: {result.entries} entries, hash chain intact")
+        return
+    click.echo(
+        f"Broken at line {result.first_bad_line}: {result.reason} "
+        f"(verified {result.entries} entries)"
+    )
+    raise SystemExit(1)
+
+
 if __name__ == "__main__":
-    cli(prog_name="pathscope")
+    if sys.argv[1:2] == ["audit"]:
+        audit(prog_name="pathscope audit", args=sys.argv[2:])
+    else:
+        cli(prog_name="pathscope")
