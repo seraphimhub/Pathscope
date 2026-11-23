@@ -30,21 +30,23 @@ flowchart TD
 
 ## Core Capabilities
 
-*  High-concurrency asynchronous crawling
+*  Bounded-concurrency asynchronous crawling (fixed worker pool)
 *  Deep recursive internal route traversal
 *  Endpoint extraction from HTML and JavaScript
-*  Secret pattern discovery
-*  Modular scanner architecture
-*  Structured JSON findings
-*  SPA-ready rendering extension path
-*  Clean package structure for scaling teams
+*  Secret pattern discovery without exposing secret values
+*  Strict host-scope enforcement, including redirect hops
+*  Optional private/loopback/metadata address guard
+*  Redirect chain following with loop detection and hop limits
+*  Per-URL error isolation (one failure never aborts the scan)
+*  Response size caps and non-text content rejection
+*  Structured, de-duplicated JSON findings
 
 ---
 
 ## Terminal Preview
 
 ```bash id="83x5dm"
-$ python3 cli.py https://example.com --depth 100 --concurrency 80
+$ python3 cli.py --target https://example.com --depth 3 --workers 8
 
 ███████╗███████╗██████╗  █████╗ ██████╗ ██╗  ██╗██╗███╗   ███╗
 ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔══██╗██║  ██║██║████╗ ████║
@@ -102,7 +104,28 @@ python3 cli.py
 ### CLI mode
 
 ```bash id="d9u3v0"
-python3 cli.py https://example.com --depth 100 --concurrency 80
+python3 cli.py --target https://example.com --depth 3 --workers 8
+```
+
+### Common options
+
+```text
+--target URL            target to crawl (or TARGET_URL)
+--depth N               maximum crawl depth (default 2)
+--workers N             concurrent request budget (default 8)
+--max-pages N           hard cap on visited pages (default 1000)
+--timeout SECONDS       per-request timeout (default 20)
+--max-redirects N       redirect hops followed per request (default 5)
+--output-dir PATH       where findings.json is written (default output)
+--block-private         refuse loopback/private/link-local/metadata targets
+--secrets/--no-secrets  toggle secret pattern scanning
+--endpoints/--no-endpoints
+--js/--no-js            toggle JavaScript analysis
+--headers JSON|k:v      extra request headers
+--cookie JSON|k:v       cookies to send
+--config PATH           YAML config file
+--quiet                 suppress the summary
+--json                  emit a machine-readable summary
 ```
 
 ---
@@ -122,15 +145,21 @@ Example:
   {
     "type": "endpoint",
     "url": "https://example.com/app.js",
-    "endpoint": "/api/v1/users"
+    "endpoint": "/api/v1/users",
+    "line": 12
   },
   {
     "type": "secret_pattern",
     "url": "https://example.com/config.js",
-    "pattern": "token"
+    "pattern": "token",
+    "line": 4,
+    "count": 1
   }
 ]
 ```
+
+Findings are de-duplicated and never contain the matched secret value: a
+secret finding records *where* the pattern appears, not what it is.
 
 ---
 
@@ -150,18 +179,29 @@ pathscope/
 
 ## CI / Quality
 
-Recommended GitHub Actions workflow:
+Workflow:
 
 ```text id="rq9tv5"
-.github/workflows/python.yml
+.github/workflows/ci.yml
 ```
 
-Checks:
+Checks (Python 3.11 / 3.12 / 3.13):
 
-* import validation
-* syntax test
-* package integrity
-* future pytest integration
+* import and syntax validation
+* `ruff check` and `ruff format --check`
+* `mypy` on `core`, `crawler`, `scanners`
+* `bandit` static security scan
+* full `pytest` suite and coverage report
+* secret-pattern guard over tracked files
+
+Local equivalent:
+
+```bash
+ruff check . && ruff format --check .
+python -m mypy core crawler scanners
+bandit -r core crawler scanners
+python -m pytest tests/ --strict-markers -q
+```
 
 ---
 
@@ -189,9 +229,9 @@ Always maintain:
 *  Redis distributed queue
 *  HTML reporting
 *  CSV / SARIF exporters
-*  authenticated crawling
 *  sitemap ingestion
 *  plugin scanner API
+*  DNS-resolution based address checks
 
 ---
 

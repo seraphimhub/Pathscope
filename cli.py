@@ -21,7 +21,8 @@ import click
 from core.banner import BANNER
 from core.config import load_cli_options_from_config, resolve_target_from_args
 from core.exceptions import PathscopeError
-from crawler.engine import Engine
+from crawler.engine import DEFAULT_MAX_PAGES, Engine
+from crawler.fetcher import DEFAULT_MAX_REDIRECTS, DEFAULT_TIMEOUT
 
 OUTPUT_DIR = os.environ.get("PATHSCOPE_OUTPUT_DIR", "output")
 
@@ -31,6 +32,8 @@ logging.basicConfig(
     level=logging.WARNING,
     force=True,
 )
+
+log = logging.getLogger("pathscope.cli")
 
 
 def _parse_kv_or_json(raw: str) -> dict[str, str]:
@@ -70,13 +73,42 @@ def _parse_api_key(raw: str) -> str | None:
             if isinstance(value, str):
                 return value
         keys = list(parsed.keys())
-        if keys and isinstance(parsed[keys[0]], str):
-            return parsed[keys[0]]
+        if keys:
+            first = parsed[keys[0]]
+            if isinstance(first, str):
+                return first
 
     if isinstance(parsed, str):
         return parsed
 
     return None
+
+
+def _ensure_scheme(target: str) -> str:
+    """Prefix ``https://`` when the operator omitted the scheme."""
+    target = (target or "").strip()
+    if not target:
+        return target
+    if "://" in target:
+        return target
+    return f"https://{target}"
+
+
+def _build_headers(*, headers: str, cookie: str, api: str, auth: str | None) -> dict[str, str]:
+    """Compose the request headers from the CLI options."""
+    result = _parse_kv_or_json(headers)
+
+    cookies = _parse_kv_or_json(cookie)
+    if cookies:
+        result["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookies.items())
+    elif cookie.strip():
+        result["Cookie"] = cookie.strip()
+
+    token = _parse_api_key(api) or _parse_api_key(auth or "")
+    if token:
+        result.setdefault("Authorization", f"Bearer {token}")
+
+    return result
 
 
 async def _run_cli(
@@ -94,8 +126,15 @@ async def _run_cli(
     quiet: bool,
     config: str | None,
     json_out: bool,
+    output_dir: str = OUTPUT_DIR,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    block_private: bool = False,
 ) -> int:
     """Run one Pathscope scan using the resolved CLI + config + env values."""
+    logging.getLogger().setLevel(logging.ERROR if quiet else logging.INFO)
+
     click.echo(BANNER)
 
     resolved_target = target or resolve_target_from_args(
@@ -104,6 +143,7 @@ async def _run_cli(
     if not resolved_target:
         click.echo("Error: No target URL provided. Use --target or set TARGET_URL env var.")
         sys.exit(1)
+    resolved_target = _ensure_scheme(str(resolved_target))
 
     defaults: dict[str, Any] = {
         "target": resolved_target,
@@ -116,12 +156,16 @@ async def _run_cli(
         "endpoints": endpoints,
         "js": js,
         "auth": auth,
+        "output_dir": output_dir,
+        "max_pages": max_pages,
+        "timeout": timeout,
+        "max_redirects": max_redirects,
+        "block_private": block_private,
     }
 
-    config_path = config
-    if config_path:
-        merged = load_cli_options_from_config(config_path, defaults=defaults)
-        resolved_target = merged.get("target", resolved_target) or resolved_target
+    if config:
+        merged = load_cli_options_from_config(config, defaults=defaults)
+        resolved_target = _ensure_scheme(str(merged.get("target", resolved_target)))
         depth = int(merged.get("depth", depth))
         workers = int(merged.get("workers", workers))
         headers = merged.get("headers", headers) or headers
@@ -131,8 +175,13 @@ async def _run_cli(
         endpoints = bool(merged.get("endpoints", endpoints))
         js = bool(merged.get("js", js))
         auth = merged.get("auth", auth) or auth
+        output_dir = str(merged.get("output_dir", output_dir))
+        max_pages = int(merged.get("max_pages", max_pages))
+        timeout = float(merged.get("timeout", timeout))
+        max_redirects = int(merged.get("max_redirects", max_redirects))
+        block_private = bool(merged.get("block_private", block_private))
         if not quiet:
-            click.echo(f"Using configuration file: {config_path}")
+            click.echo(f"Using configuration file: {config}")
 
     os.environ["TARGET_URL"] = str(resolved_target)
     os.environ["CRAWL_DEPTH"] = str(depth)
@@ -141,49 +190,48 @@ async def _run_cli(
     runner = Engine(
         start_url=str(resolved_target),
         depth=depth,
+        workers=workers,
+        timeout=float(timeout),
+        max_pages=int(max_pages),
+        max_redirects=int(max_redirects),
+        headers=_build_headers(headers=headers, cookie=cookie, api=api, auth=auth),
+        block_private=block_private,
+        scan_secrets_enabled=secrets,
+        scan_endpoints_enabled=endpoints,
+        scan_js=js,
+        output_dir=output_dir,
     )
 
     try:
         if not quiet:
             click.echo("\n[!] Running scan...")
         await runner.run()
-        results: Any = runner
     except KeyboardInterrupt:
         click.echo("\r[!] Scan interrupted by user.")
         click.echo("\n[!] Scan stopped safely.")
         return 0
-
     except PathscopeError as exc:
         click.echo(f"\n[!] Scan failed: {exc}")
         return 2
 
-    if not results:
-        click.echo("\n[!] No results returned.")
-        return 1
-
-    discovered = (
-        len(getattr(results, "discovered_urls", [])) if hasattr(results, "discovered_urls") else 0
-    )
-    endpoints_total = len(getattr(results, "endpoints", [])) if hasattr(results, "endpoints") else 0
-    findings = len(getattr(results, "findings", [])) if hasattr(results, "findings") else 0
-    errors_count = len(getattr(results, "errors", [])) if hasattr(results, "errors") else 0
-    elapsed = getattr(results, "elapsed", "N/A")
+    discovered = len(runner.discovered_urls)
+    endpoints_total = len(runner.endpoints)
+    findings = len(runner.findings)
+    errors_count = len(runner.errors)
+    elapsed = runner.elapsed
 
     if not quiet:
         click.echo("\n[!] Scan complete")
-        click.echo("[*] Results saved to output directory")
+        click.echo(f"[*] Findings written to {os.path.join(output_dir, 'findings.json')}")
         click.echo("")
         click.echo(f"Total Discovered : {discovered}")
+        click.echo(f"Total Pages      : {runner.pages_fetched}")
         click.echo(f"Total Endpoints  : {endpoints_total}")
         click.echo(f"Total Findings   : {findings}")
         click.echo(f"Total Errors     : {errors_count}")
-        click.echo(f"Elapsed         : {elapsed}")
+        click.echo(f"Redirects        : {runner.redirects_followed}")
+        click.echo(f"Elapsed          : {elapsed:.2f}s")
         click.echo("")
-
-        if findings > 0:
-            click.echo("[!] Results saved to output directory")
-            click.echo("[*] Run again with --quiet to suppress this display")
-            click.echo("")
 
     if json_out:
         click.echo("")
@@ -192,10 +240,12 @@ async def _run_cli(
                 {
                     "target": str(resolved_target),
                     "discovered": discovered,
+                    "pages": runner.pages_fetched,
                     "endpoints": endpoints_total,
                     "findings": findings,
                     "errors": errors_count,
-                    "elapsed": elapsed,
+                    "redirects": runner.redirects_followed,
+                    "elapsed": round(elapsed, 3),
                 },
                 indent=2,
                 default=str,
@@ -216,7 +266,7 @@ TARGET_OPTION = click.option(
 @click.command()
 @TARGET_OPTION
 @click.option("--depth", "depth", default=2, type=int, help="Max crawl depth.")
-@click.option("--workers", "workers", default=8, type=int, help="Max concurrent workers.")
+@click.option("--workers", "workers", default=8, type=int, help="Max concurrent requests.")
 @click.option("--headers", "headers", default="", help="Headers as JSON or key:value pairs.")
 @click.option("--cookie", "cookie", default="", help="Cookies as JSON or key:value pairs.")
 @click.option("--api", "api", default="", help="API key or JSON token for auth.")
@@ -227,7 +277,7 @@ TARGET_OPTION = click.option(
     default=True,
     help="Toggle endpoint discovery.",
 )
-@click.option("--js/--no-js", "js", default=True, help="Toggle JavaScript discovery.")
+@click.option("--js/--no-js", "js", default=True, help="Toggle JavaScript analysis.")
 @click.option("--auth", "auth", default=None, help="Auth profile or token.")
 @click.option("--quiet", "quiet", is_flag=True, help="Suppress scan summary output.")
 @click.option("--config", "config", default=None, help="Path to YAML config file.")
@@ -236,6 +286,44 @@ TARGET_OPTION = click.option(
     "json_out",
     is_flag=True,
     help="Emit machine-readable JSON summary to stdout.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    default=OUTPUT_DIR,
+    show_default=True,
+    help="Directory for findings.json.",
+)
+@click.option(
+    "--max-pages",
+    "max_pages",
+    default=DEFAULT_MAX_PAGES,
+    type=int,
+    show_default=True,
+    help="Hard cap on pages visited.",
+)
+@click.option(
+    "--timeout",
+    "timeout",
+    default=DEFAULT_TIMEOUT,
+    type=float,
+    show_default=True,
+    help="Per-request timeout in seconds.",
+)
+@click.option(
+    "--max-redirects",
+    "max_redirects",
+    default=DEFAULT_MAX_REDIRECTS,
+    type=int,
+    show_default=True,
+    help="Maximum redirect hops to follow per request.",
+)
+@click.option(
+    "--block-private/--allow-private",
+    "block_private",
+    default=False,
+    show_default=True,
+    help="Refuse loopback, private, link-local and metadata targets.",
 )
 def cli(
     *,
@@ -252,6 +340,11 @@ def cli(
     quiet: bool,
     config: str | None,
     json_out: bool,
+    output_dir: str,
+    max_pages: int,
+    timeout: float,
+    max_redirects: int,
+    block_private: bool,
 ) -> None:
     """Pathscope: professional web discovery and attack surface intelligence."""
     sys.exit(
@@ -270,6 +363,11 @@ def cli(
                 quiet=quiet,
                 config=config,
                 json_out=json_out,
+                output_dir=output_dir,
+                max_pages=max_pages,
+                timeout=timeout,
+                max_redirects=max_redirects,
+                block_private=block_private,
             )
         )
     )

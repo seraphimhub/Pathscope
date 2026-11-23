@@ -76,6 +76,11 @@ def load_cli_options_from_config(
         "endpoints",
         "js",
         "auth",
+        "output_dir",
+        "max_pages",
+        "timeout",
+        "max_redirects",
+        "block_private",
     ):
         if key in cfg and cfg[key] is not None:
             merged[key] = cfg[key]

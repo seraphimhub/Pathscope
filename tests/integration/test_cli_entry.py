@@ -28,5 +28,10 @@ def test_cli_accepts_required_kwargs() -> None:
         "quiet",
         "config",
         "json_out",
+        "output_dir",
+        "max_pages",
+        "timeout",
+        "max_redirects",
+        "block_private",
     ]
     assert params == expected

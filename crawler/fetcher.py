@@ -1,46 +1,208 @@
+"""HTTP fetching with bounded redirects, size limits, and content sniffing.
+
+The crawler must never be able to: follow an unbounded redirect chain, follow a
+redirect out of its authorized host, or buffer an arbitrarily large body. All
+three limits are enforced here rather than in the engine so that every caller
+inherits them.
+"""
+
 from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from urllib.parse import urljoin
 
 import aiohttp
 
+from core.exceptions import FetchError
 
-class FetchError(Exception):
-    """Raised when a fetch does not return usable content."""
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
-    def __init__(self, url: str, *, reason: str | None = None) -> None:
-        self.url = url
-        self.reason = reason or "fetch failed"
-        super().__init__(self.reason)
+TEXT_CONTENT_TYPES = (
+    "text/",
+    "application/json",
+    "application/javascript",
+    "application/x-javascript",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/x-www-form-urlencoded",
+    "application/ld+json",
+)
+
+DEFAULT_TIMEOUT = 20.0
+DEFAULT_MAX_REDIRECTS = 5
+DEFAULT_MAX_BYTES = 2_000_000
+
+
+@dataclass(slots=True)
+class FetchResult:
+    """Outcome of a single logical fetch, including the redirect chain."""
+
+    url: str
+    status: int = 0
+    text: str = ""
+    content_type: str = ""
+    redirects: tuple[str, ...] = field(default_factory=tuple)
+    truncated: bool = False
+
+    @property
+    def ok(self) -> bool:
+        """True when the request completed with a success status."""
+        return 200 <= self.status < 400
+
+    @property
+    def is_text(self) -> bool:
+        """True when the body is text and safe to scan."""
+        return bool(self.text)
+
+
+def is_text_content_type(content_type: str) -> bool:
+    """Return True when ``content_type`` denotes a scannable text payload."""
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if not media_type:
+        # Servers without a Content-Type are treated as text; the size cap and
+        # decode error handling keep that safe.
+        return True
+    return any(
+        media_type.startswith(prefix) or media_type == prefix for prefix in TEXT_CONTENT_TYPES
+    )
+
+
+async def fetch_response(
+    session: aiohttp.ClientSession | None,
+    url: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    allow_redirect_to: Callable[[str], bool] | None = None,
+) -> FetchResult:
+    """Fetch ``url`` following at most ``max_redirects`` hops.
+
+    ``allow_redirect_to`` is consulted for every hop and may veto it (raise or
+    return False); the engine uses it to keep redirects inside the scan scope.
+    """
+    if session is None:
+        return FetchResult(url=url)
+
+    current = url
+    chain: list[str] = []
+    redirect_budget = max(0, max_redirects)
+
+    for _ in range(redirect_budget + 1):
+        try:
+            async with session.get(
+                current,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_redirects=False,
+            ) as resp:
+                location = resp.headers.get("Location")
+                if resp.status in REDIRECT_STATUSES and location:
+                    target = urljoin(current, location)
+                    if target in chain or target == current:
+                        raise FetchError(current, reason="redirect loop detected")
+                    if allow_redirect_to is not None and not allow_redirect_to(target):
+                        raise FetchError(target, reason="redirect target rejected by scope policy")
+                    if len(chain) >= redirect_budget:
+                        raise FetchError(
+                            current, reason=f"redirect limit exceeded ({redirect_budget})"
+                        )
+                    chain.append(target)
+                    current = target
+                    continue
+
+                content_type = resp.headers.get("Content-Type", "")
+                if not is_text_content_type(content_type):
+                    return FetchResult(
+                        url=current,
+                        status=resp.status,
+                        content_type=content_type,
+                        redirects=tuple(chain),
+                    )
+
+                text, truncated = await _read_text(resp, max_bytes)
+                return FetchResult(
+                    url=current,
+                    status=resp.status,
+                    text=_for_status(resp.status, text),
+                    content_type=content_type,
+                    redirects=tuple(chain),
+                    truncated=truncated,
+                )
+        except aiohttp.ClientResponseError:
+            # Surfaced only when raise_for_status is enabled; treat as empty.
+            return FetchResult(url=current, redirects=tuple(chain))
+        except FetchError:
+            raise
+        except aiohttp.ClientError as exc:
+            raise FetchError(current, reason=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - defensive boundary
+            raise FetchError(current, reason=str(exc)) from exc
+
+    raise FetchError(url, reason=f"redirect limit exceeded ({redirect_budget})")
 
 
 async def fetch(
     session: aiohttp.ClientSession | None,
     url: str,
     *,
-    timeout: float = 20.0,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    allow_redirect_to: Callable[[str], bool] | None = None,
 ) -> str:
-    """Fetch a URL and return its text body.
+    """Fetch a URL and return its text body (empty string for non-text/error)."""
+    result = await fetch_response(
+        session,
+        url,
+        timeout=timeout,
+        max_redirects=max_redirects,
+        max_bytes=max_bytes,
+        allow_redirect_to=allow_redirect_to,
+    )
+    return result.text
 
-    Returns an empty string on network errors or non-text responses.
+
+def _for_status(status: int, text: str) -> str:
+    """Drop bodies of error responses; they carry no crawlable content."""
+    if 200 <= status < 300:
+        return text
+    return ""
+
+
+async def _read_text(resp: aiohttp.ClientResponse, max_bytes: int) -> tuple[str, bool]:
+    """Read at most ``max_bytes`` and decode leniently.
+
+    Returns ``(text, truncated)``.
     """
-    if session is None:
-        return ""
-
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-            text = await _safe_text(resp)
-            return text if text else ""
-    except aiohttp.ClientResponseError:
-        # Non-2xx responses can surface here depending on aiohttp configuration.
-        return ""
-    except aiohttp.ClientError as exc:
-        raise FetchError(url, reason=str(exc)) from exc
-    except Exception as exc:
-        raise FetchError(url, reason=str(exc)) from exc
-
-
-async def _safe_text(resp: aiohttp.ClientResponse) -> str:
-    """Read the response body as text, ignoring decode errors."""
-    try:
-        return await resp.text(errors="ignore")
+        while True:
+            chunk = await resp.content.read(65536)
+            if not chunk:
+                break
+            remaining = max_bytes - total
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(chunk) > remaining:
+                chunks.append(chunk[:remaining])
+                total += remaining
+                truncated = True
+                break
+            chunks.append(chunk)
+            total += len(chunk)
     except Exception:
-        return ""
+        return "", False
+
+    raw = b"".join(chunks)
+    if not raw:
+        return "", truncated
+
+    encoding = resp.charset or "utf-8"
+    try:
+        return raw.decode(encoding, errors="ignore"), truncated
+    except LookupError:
+        return raw.decode("utf-8", errors="ignore"), truncated
