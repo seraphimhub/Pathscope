@@ -50,3 +50,33 @@ def resolve_target_from_args(config_path: str | None, *, env_target: str = "") -
         if isinstance(cfg, dict) and cfg.get("target"):
             return cfg["target"]
     return None
+
+
+def load_cli_options_from_config(
+    config_path: str | None, *, defaults: dict[str, Any]
+) -> dict[str, Any]:
+    """Return CLI option overrides from a config file on top of runtime defaults.
+
+    This is the stable helper used by the CLI to merge config file values with
+    the command-line defaults before resolving the final scan parameters.
+    """
+    cfg = load_config_from_file(config_path)
+    if not isinstance(cfg, dict):
+        return dict(defaults)
+
+    merged: dict[str, Any] = dict(defaults)
+    for key in (
+        "target",
+        "depth",
+        "workers",
+        "headers",
+        "cookie",
+        "api",
+        "secrets",
+        "endpoints",
+        "js",
+        "auth",
+    ):
+        if key in cfg and cfg[key] is not None:
+            merged[key] = cfg[key]
+    return merged

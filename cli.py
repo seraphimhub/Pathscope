@@ -19,7 +19,7 @@ from typing import Any
 import click
 
 from core.banner import BANNER
-from core.config import load_config_from_file, resolve_target_from_args
+from core.config import load_cli_options_from_config, resolve_target_from_args
 from core.exceptions import PathscopeError
 from crawler.engine import Engine
 
@@ -105,23 +105,34 @@ async def _run_cli(
         click.echo("Error: No target URL provided. Use --target or set TARGET_URL env var.")
         sys.exit(1)
 
-    config_path = None
-    if config:
-        config_path = config
-        loaded = load_config_from_file(config_path)
-        if loaded:
-            resolved_target = loaded.get("target", resolved_target) or resolved_target
-            depth = loaded.get("depth", depth)
-            workers = loaded.get("workers", workers)
-            headers = loaded.get("headers", headers) or headers
-            cookie = loaded.get("cookie", cookie) or cookie
-            api = loaded.get("api", api) or api
-            secrets = loaded.get("secrets", secrets)
-            endpoints = loaded.get("endpoints", endpoints)
-            js = loaded.get("js", js)
-            auth = loaded.get("auth", auth) or auth
-            if not quiet:
-                click.echo(f"Using configuration file: {config_path}")
+    defaults: dict[str, Any] = {
+        "target": resolved_target,
+        "depth": depth,
+        "workers": workers,
+        "headers": headers,
+        "cookie": cookie,
+        "api": api,
+        "secrets": secrets,
+        "endpoints": endpoints,
+        "js": js,
+        "auth": auth,
+    }
+
+    config_path = config
+    if config_path:
+        merged = load_cli_options_from_config(config_path, defaults=defaults)
+        resolved_target = merged.get("target", resolved_target) or resolved_target
+        depth = int(merged.get("depth", depth))
+        workers = int(merged.get("workers", workers))
+        headers = merged.get("headers", headers) or headers
+        cookie = merged.get("cookie", cookie) or cookie
+        api = merged.get("api", api) or api
+        secrets = bool(merged.get("secrets", secrets))
+        endpoints = bool(merged.get("endpoints", endpoints))
+        js = bool(merged.get("js", js))
+        auth = merged.get("auth", auth) or auth
+        if not quiet:
+            click.echo(f"Using configuration file: {config_path}")
 
     os.environ["TARGET_URL"] = str(resolved_target)
     os.environ["CRAWL_DEPTH"] = str(depth)
