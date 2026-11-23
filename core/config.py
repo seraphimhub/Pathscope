@@ -29,15 +29,38 @@ INT_OPTIONS: dict[str, tuple[int, int]] = {
     "workers": (1, 512),
     "max_pages": (1, 1_000_000),
     "max_redirects": (0, 50),
+    "max_retries": (0, 10),
 }
 
 FLOAT_OPTIONS: dict[str, tuple[float, float]] = {
     "timeout": (0.1, 600.0),
+    "rps": (0.0, 1_000.0),
+    "delay": (0.0, 60.0),
+    "jitter": (0.0, 60.0),
+    "max_error_rate": (0.0, 1.0),
 }
 
-BOOL_OPTIONS = frozenset({"secrets", "endpoints", "js", "block_private", "allow_scheme_downgrade"})
+ROBOTS_POLICIES = frozenset({"off", "report", "respect"})
 
-STR_OPTIONS = frozenset({"target", "headers", "cookie", "api", "auth", "output_dir"})
+BOOL_OPTIONS = frozenset(
+    {"secrets", "endpoints", "js", "block_private", "allow_scheme_downgrade", "lab_mode"}
+)
+
+STR_OPTIONS = frozenset(
+    {
+        "target",
+        "headers",
+        "cookie",
+        "api",
+        "auth",
+        "output_dir",
+        "authorized_by",
+        "scope_file",
+        "user_agent",
+        "scan_id",
+        "robots",
+    }
+)
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -159,6 +182,20 @@ def validate_scan_options(options: dict[str, Any]) -> dict[str, Any]:
 
     if cleaned.get("output_dir") == "":
         raise ConfigurationError("output_dir must not be empty", details={"option": "output_dir"})
+
+    robots = cleaned.get("robots")
+    if robots is not None:
+        policy = str(robots).strip().lower()
+        if policy not in ROBOTS_POLICIES:
+            raise ConfigurationError(
+                f"robots must be one of: {', '.join(sorted(ROBOTS_POLICIES))}",
+                details={"option": "robots", "value": robots},
+            )
+        cleaned["robots"] = policy
+
+    user_agent = cleaned.get("user_agent")
+    if user_agent is not None and not str(user_agent).strip():
+        raise ConfigurationError("user_agent must not be empty", details={"option": "user_agent"})
 
     return cleaned
 

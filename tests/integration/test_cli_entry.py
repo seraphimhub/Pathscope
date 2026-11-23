@@ -34,6 +34,17 @@ def test_cli_accepts_required_kwargs() -> None:
         "max_redirects",
         "block_private",
         "allow_scheme_downgrade",
+        "authorized_by",
+        "scope_file",
+        "lab_mode",
+        "rps",
+        "delay",
+        "jitter",
+        "max_retries",
+        "max_error_rate",
+        "user_agent",
+        "scan_id",
+        "robots",
         "explicit",
     ]
     assert params == expected

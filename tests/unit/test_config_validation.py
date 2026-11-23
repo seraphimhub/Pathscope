@@ -107,11 +107,40 @@ def test_numeric_strings_are_coerced() -> None:
         {"output_dir": 123},
         {"output_dir": ""},
         {"target": 42},
+        {"rps": -1},
+        {"delay": 61},
+        {"jitter": -0.5},
+        {"max_retries": 11},
+        {"max_error_rate": 1.5},
+        {"robots": "sometimes"},
+        {"user_agent": "   "},
+        {"lab_mode": "maybe"},
+        {"authorized_by": 123},
     ],
 )
 def test_invalid_options_are_rejected(options: dict[str, object]) -> None:
     with pytest.raises(ConfigurationError):
         validate_scan_options(options)
+
+
+def test_safe_operation_options_are_normalized() -> None:
+    cleaned = validate_scan_options(
+        {
+            "rps": "20",
+            "delay": 0.5,
+            "jitter": 0.1,
+            "max_retries": 3,
+            "max_error_rate": 0.25,
+            "robots": "Respect",
+            "lab_mode": "yes",
+            "user_agent": "Pathscope-test/1.0",
+            "scan_id": "abc",
+        }
+    )
+    assert cleaned["rps"] == 20.0
+    assert cleaned["robots"] == "respect"
+    assert cleaned["lab_mode"] is True
+    assert cleaned["max_retries"] == 3
 
 
 def test_unknown_keys_are_preserved_for_forward_compatibility() -> None:

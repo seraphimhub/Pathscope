@@ -33,6 +33,7 @@ ENV/
 # Pathscope Scan Output
 # =========================
 output/*.json
+output/*.jsonl
 output/*.txt
 output/*.log
 output/*.csv

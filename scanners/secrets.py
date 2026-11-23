@@ -22,11 +22,13 @@ _COMPILED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 
 _CATEGORY_BY_KEYWORD = {
     "api": "api_key",
-    "secret": "secret",
-    "token": "token",
+    # These are detector category labels printed in findings, never credential
+    # values; bandit's B105 heuristic matches the words alone.
+    "secret": "secret",  # nosec B105
+    "token": "token",  # nosec B105
     "jwt": "jwt",
     "authorization": "authorization",
-    "password": "password",
+    "password": "password",  # nosec B105
 }
 
 _QUOTED_RE = re.compile(r"""(["'])([^"'\n]*)(\1)""")

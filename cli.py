@@ -18,9 +18,12 @@ from typing import Any
 
 import click
 
+from core.authorization import resolve_authorization
 from core.banner import BANNER
 from core.config import load_config_from_file, merge_cli_options
 from core.exceptions import PathscopeError
+from core.redaction import redact_text, redact_url
+from core.version import DEFAULT_USER_AGENT
 from crawler.engine import DEFAULT_MAX_PAGES, Engine
 from crawler.fetcher import DEFAULT_MAX_REDIRECTS, DEFAULT_TIMEOUT
 
@@ -132,6 +135,17 @@ async def _run_cli(
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
     block_private: bool = False,
     allow_scheme_downgrade: bool = False,
+    authorized_by: str | None = None,
+    scope_file: str | None = None,
+    lab_mode: bool = False,
+    rps: float = 0.0,
+    delay: float = 0.0,
+    jitter: float = 0.0,
+    max_retries: int = 2,
+    max_error_rate: float = 0.5,
+    user_agent: str = DEFAULT_USER_AGENT,
+    scan_id: str = "",
+    robots: str = "off",
     explicit: dict[str, Any] | None = None,
 ) -> int:
     """Run one Pathscope scan using the resolved CLI + config + env values."""
@@ -163,6 +177,17 @@ async def _run_cli(
         "max_redirects": max_redirects,
         "block_private": block_private,
         "allow_scheme_downgrade": allow_scheme_downgrade,
+        "authorized_by": authorized_by,
+        "scope_file": scope_file,
+        "lab_mode": lab_mode,
+        "rps": rps,
+        "delay": delay,
+        "jitter": jitter,
+        "max_retries": max_retries,
+        "max_error_rate": max_error_rate,
+        "user_agent": user_agent,
+        "scan_id": scan_id,
+        "robots": robots,
     }
 
     try:
@@ -191,10 +216,38 @@ async def _run_cli(
     max_redirects = int(merged["max_redirects"])
     block_private = bool(merged["block_private"])
     allow_scheme_downgrade = bool(merged["allow_scheme_downgrade"])
+    authorized_by = merged.get("authorized_by")
+    scope_file = merged.get("scope_file")
+    lab_mode = bool(merged["lab_mode"])
+    rps = float(merged["rps"])
+    delay = float(merged["delay"])
+    jitter = float(merged["jitter"])
+    max_retries = int(merged["max_retries"])
+    max_error_rate = float(merged["max_error_rate"])
+    user_agent = str(merged.get("user_agent") or DEFAULT_USER_AGENT)
+    scan_id = str(merged.get("scan_id") or "")
+    robots = str(merged.get("robots") or "off")
+
+    try:
+        authorization = resolve_authorization(
+            target=str(resolved_target),
+            authorized_by=str(authorized_by) if authorized_by else None,
+            scope_file=str(scope_file) if scope_file else None,
+            lab_mode=lab_mode,
+        )
+    except PathscopeError as exc:
+        click.echo(f"\n[!] Authorization error: {redact_text(str(exc))}")
+        return 2
 
     os.environ["TARGET_URL"] = str(resolved_target)
     os.environ["CRAWL_DEPTH"] = str(depth)
     os.environ["MAX_WORKERS"] = str(workers)
+
+    request_headers = _build_headers(headers=headers, cookie=cookie, api=api, auth=auth)
+    if not any(name.lower() == "user-agent" for name in request_headers):
+        request_headers["User-Agent"] = user_agent
+    if scan_id and not any(name.lower() == "x-pathscope-scan-id" for name in request_headers):
+        request_headers["X-Pathscope-Scan-Id"] = scan_id
 
     runner = Engine(
         start_url=str(resolved_target),
@@ -203,12 +256,21 @@ async def _run_cli(
         timeout=float(timeout),
         max_pages=int(max_pages),
         max_redirects=int(max_redirects),
-        headers=_build_headers(headers=headers, cookie=cookie, api=api, auth=auth),
+        headers=request_headers,
         block_private=block_private,
         scan_secrets_enabled=secrets,
         scan_endpoints_enabled=endpoints,
         scan_js=js,
         allow_scheme_downgrade=allow_scheme_downgrade,
+        robots_policy=robots,
+        rps=rps,
+        delay=delay,
+        jitter=jitter,
+        max_retries=max_retries,
+        max_error_rate=max_error_rate,
+        scan_id=scan_id,
+        user_agent=user_agent,
+        authorization=authorization.to_metadata(),
         output_dir=output_dir,
     )
 
@@ -221,7 +283,7 @@ async def _run_cli(
         click.echo("\n[!] Scan stopped safely.")
         return 0
     except PathscopeError as exc:
-        click.echo(f"\n[!] Scan failed: {exc}")
+        click.echo(f"\n[!] Scan failed: {redact_text(str(exc))}")
         return 2
 
     discovered = len(runner.discovered_urls)
@@ -253,7 +315,7 @@ async def _run_cli(
         click.echo(
             json.dumps(
                 {
-                    "target": str(resolved_target),
+                    "target": redact_url(str(resolved_target)),
                     "discovered": discovered,
                     "pages": runner.pages_fetched,
                     "requests": requests_made,
@@ -349,6 +411,58 @@ TARGET_OPTION = click.option(
     default=False,
     help="Follow https -> http redirects (sends session headers in cleartext).",
 )
+@click.option(
+    "--authorized-by",
+    "authorized_by",
+    default=None,
+    help="Who authorized this scan (recorded in scan.json and the audit log).",
+)
+@click.option(
+    "--scope-file",
+    "scope_file",
+    default=None,
+    help="YAML scope file with owner, reference, allowed hosts, and validity window.",
+)
+@click.option(
+    "--lab-mode",
+    "lab_mode",
+    is_flag=True,
+    default=False,
+    help="Run without external authorization on a machine you own (recorded).",
+)
+@click.option("--rps", "rps", default=0.0, type=float, help="Maximum request starts per second.")
+@click.option("--delay", "delay", default=0.0, type=float, help="Minimum seconds between requests.")
+@click.option("--jitter", "jitter", default=0.0, type=float, help="Random extra delay per request.")
+@click.option(
+    "--max-retries", "max_retries", default=2, type=int, help="Retries for 429/503 responses."
+)
+@click.option(
+    "--max-error-rate",
+    "max_error_rate",
+    default=0.5,
+    type=float,
+    help="Circuit-breaker threshold once 20 attempts have been made.",
+)
+@click.option(
+    "--user-agent",
+    "user_agent",
+    default=DEFAULT_USER_AGENT,
+    show_default=True,
+    help="User-Agent sent with every request.",
+)
+@click.option(
+    "--scan-id",
+    "scan_id",
+    default="",
+    help="Optional identifier sent as X-Pathscope-Scan-Id and recorded.",
+)
+@click.option(
+    "--robots",
+    "robots",
+    type=click.Choice(["off", "report", "respect"]),
+    default="off",
+    help="robots.txt policy: ignore, report refusals, or respect them.",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -372,6 +486,17 @@ def cli(
     max_redirects: int,
     block_private: bool,
     allow_scheme_downgrade: bool,
+    authorized_by: str | None,
+    scope_file: str | None,
+    lab_mode: bool,
+    rps: float,
+    delay: float,
+    jitter: float,
+    max_retries: int,
+    max_error_rate: float,
+    user_agent: str,
+    scan_id: str,
+    robots: str,
 ) -> None:
     """Pathscope: professional web discovery and attack surface intelligence."""
     explicit = {
@@ -393,6 +518,17 @@ def cli(
             "max_redirects": max_redirects,
             "block_private": block_private,
             "allow_scheme_downgrade": allow_scheme_downgrade,
+            "authorized_by": authorized_by,
+            "scope_file": scope_file,
+            "lab_mode": lab_mode,
+            "rps": rps,
+            "delay": delay,
+            "jitter": jitter,
+            "max_retries": max_retries,
+            "max_error_rate": max_error_rate,
+            "user_agent": user_agent,
+            "scan_id": scan_id,
+            "robots": robots,
         }.items()
         if ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
     }
@@ -419,6 +555,17 @@ def cli(
                 max_redirects=max_redirects,
                 block_private=block_private,
                 allow_scheme_downgrade=allow_scheme_downgrade,
+                authorized_by=authorized_by,
+                scope_file=scope_file,
+                lab_mode=lab_mode,
+                rps=rps,
+                delay=delay,
+                jitter=jitter,
+                max_retries=max_retries,
+                max_error_rate=max_error_rate,
+                user_agent=user_agent,
+                scan_id=scan_id,
+                robots=robots,
                 explicit=explicit,
             )
         )

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 
 import aiohttp
@@ -45,6 +47,7 @@ class FetchResult:
     content_type: str = ""
     redirects: tuple[str, ...] = field(default_factory=tuple)
     truncated: bool = False
+    retry_after: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -123,12 +126,14 @@ async def fetch_response(
                     continue
 
                 content_type = resp.headers.get("Content-Type", "")
+                retry_after = _retry_after_seconds(resp.headers.get("Retry-After"))
                 if not is_text_content_type(content_type):
                     return FetchResult(
                         url=current,
                         status=resp.status,
                         content_type=content_type,
                         redirects=tuple(chain),
+                        retry_after=retry_after,
                     )
 
                 text, truncated = await _read_text(resp, max_bytes)
@@ -139,6 +144,7 @@ async def fetch_response(
                     content_type=content_type,
                     redirects=tuple(chain),
                     truncated=truncated,
+                    retry_after=retry_after,
                 )
         except aiohttp.ClientResponseError:
             # Surfaced only when raise_for_status is enabled; treat as empty.
@@ -174,6 +180,24 @@ async def fetch(
         allow_scheme_downgrade=allow_scheme_downgrade,
     )
     return result.text
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse ``Retry-After`` as delta seconds or an HTTP date."""
+    if not value:
+        return None
+    candidate = value.strip()
+    try:
+        seconds = float(candidate)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(candidate)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    return max(0.0, seconds)
 
 
 def _for_status(status: int, text: str) -> str:

@@ -10,9 +10,6 @@ with the socket layer. These tests pin the two layers together.
 
 from __future__ import annotations
 
-import ipaddress
-import socket
-
 import pytest
 
 from core.exceptions import ScopeViolationError
@@ -50,29 +47,6 @@ NON_PUBLIC_HOSTS = [
     "127.0.0.1.",
     "::ffff:127.0.0.1",
 ]
-
-
-def _resolves_to_loopback(host: str) -> bool:
-    try:
-        answers = socket.getaddrinfo(host, 80, type=socket.SOCK_STREAM)
-    except OSError:
-        return False
-    for answer in answers:
-        try:
-            address = ipaddress.ip_address(answer[4][0].split("%", 1)[0])
-        except ValueError:
-            continue
-        if address.is_loopback or (
-            address.version == 6
-            and address.ipv4_mapped is not None
-            and address.ipv4_mapped.is_loopback
-        ):
-            return True
-    return False
-
-
-def _family_for(host: str) -> socket.AddressFamily:
-    return socket.AF_INET6 if ":" in host else socket.AF_INET
 
 
 @pytest.mark.parametrize(("host", "canonical"), LOOPBACK_FORMS.items())
@@ -137,29 +111,25 @@ def test_userinfo_in_redirect_cannot_widen_scope() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host", NON_PUBLIC_HOSTS)
-async def test_live_safe_resolver_blocks_legacy_numeric_forms(host: str) -> None:
-    if not _resolves_to_loopback(host):
-        pytest.skip(f"{host!r} is not resolved as a numeric IPv4 form on this platform")
-
-    resolver = SafeResolver(allow_private=False)
+async def test_safe_resolver_blocks_the_address_a_numeric_form_reaches(host: str) -> None:
+    # Resolver output is injected so the test does not depend on the host OS's
+    # getaddrinfo interpretation of numeric IPv4 spellings. Enforcement runs on
+    # the answer that the connector would dial.
+    resolver = SafeResolver(backing={host: ["127.0.0.1"]})
     try:
         with pytest.raises(ScopeViolationError) as excinfo:
-            await resolver.resolve(host, 80, family=_family_for(host))
+            await resolver.resolve(host, 80)
     finally:
         await resolver.close()
 
-    # Proven by the address rule, not by a resolution failure.
     assert "non-public address" in (excinfo.value.details.get("reason") or "")
 
 
 @pytest.mark.asyncio
-async def test_live_safe_resolver_still_allows_numeric_form_when_opted_in() -> None:
-    if not _resolves_to_loopback("2130706433"):
-        pytest.skip("numeric IPv4 shorthand is not resolved on this platform")
-
-    resolver = SafeResolver(allow_private=True)
+async def test_safe_resolver_allows_private_answer_only_when_opted_in() -> None:
+    resolver = SafeResolver(allow_private=True, backing={"2130706433": ["127.0.0.1"]})
     try:
-        results = await resolver.resolve("2130706433", 80, family=socket.AF_INET)
+        results = await resolver.resolve("2130706433", 80)
     finally:
         await resolver.close()
 

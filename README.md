@@ -105,14 +105,18 @@ playwright install chromium
 
 ### Via environment
 
+Every scan must state its authorization (see below); use `--lab-mode` only for
+a host you own.
+
 ```bash id="uz4w5e"
-TARGET_URL=https://example.com python3 cli.py --depth 2
+TARGET_URL=https://example.com python3 cli.py --authorized-by "TICKET-42" --depth 2
 ```
 
 ### CLI mode
 
 ```bash id="d9u3v0"
-python3 cli.py --target https://example.com --depth 3 --workers 8
+python3 cli.py --target https://example.com --authorized-by "TICKET-42" --depth 3 --workers 8
+python3 cli.py --target http://127.0.0.1:8080 --lab-mode --depth 2
 ```
 
 ### Common options
@@ -137,14 +141,26 @@ python3 cli.py --target https://example.com --depth 3 --workers 8
 --cookie JSON|k:v         cookies to send
 --api VALUE               API key or JSON token for auth
 --auth VALUE              auth profile or token
+--authorized-by TEXT      who authorized the scan (required unless lab mode)
+--scope-file PATH         YAML file: owner, reference, allowed_hosts, validity
+--lab-mode                no external authorization; local host you own only
+--rps N                   maximum request starts per second (0 = unlimited)
+--delay SECONDS           minimum gap between request starts
+--jitter SECONDS          random extra delay per request
+--max-retries N           retries for 429/503, honoring Retry-After (default 2)
+--max-error-rate N        circuit-breaker threshold after 20 attempts (default 0.5)
+--user-agent TEXT         User-Agent sent with every request
+--scan-id TEXT            optional X-Pathscope-Scan-Id correlation header
+--robots [off|report|respect]
+                          robots.txt policy (default off)
 --config PATH             YAML config file
 --quiet                   suppress the summary
 --json                    emit a machine-readable summary to stdout
 ```
 
 Exit codes: `0` for a completed scan (and for a clean Ctrl-C), `2` for an
-invalid target, a rejected configuration, or a policy refusal such as
-`--block-private` on a private address.
+invalid target, a rejected configuration or authorization, or a policy refusal
+such as `--block-private` on a private address.
 
 ---
 
@@ -191,10 +207,79 @@ that exposed one. Secret patterns are de-duplicated per page, pattern, and line,
 so the same pattern on the same line of two pages is two findings.
 
 `<output_dir>/scan.json` records the scan metadata (target, scope, timestamps,
-effective configuration, counters, status counts) and the full error list, so a
-failed URL is auditable after the run instead of only living in the terminal.
-Both output files are written atomically and are readable by the owner only
+effective configuration, authorization, identity, rate-limit and robots
+settings, counters, status counts, circuit-breaker state) and the full error
+list, so a failed URL is auditable after the run instead of only living in the
+terminal. `<output_dir>/audit.jsonl` is the append-only governance trail.
+Output files are written atomically and are readable by the owner only
 (`0600`). `--json` prints a separate machine-readable scan summary to stdout.
+
+---
+
+## Safe operation and governance
+
+### Authorization gate
+
+A scan refuses to start without an explicit authorization record:
+
+```bash
+python3 cli.py --target https://app.example.com --authorized-by "AppSec / TICKET-42"
+```
+
+A scope file is stricter and is validated before any request:
+
+```yaml
+# scope.yaml
+owner: Acme AppSec
+reference: ENG-1234
+allowed_hosts:
+  - app.example.com
+  - "*.internal.example.com"
+not_before: 2026-01-01T00:00:00Z
+not_after: 2026-02-01T00:00:00Z
+```
+
+`python3 cli.py --target https://app.example.com --scope-file scope.yaml`
+refuses unknown keys, a wildcard `*`, missing owner/reference, an expired or
+not-yet-valid window, and a target host that the file does not cover.
+`--lab-mode` is the only way to run without authorization; it is meant for a
+host you own and is recorded as such. The decision appears in `scan.json`
+(`authorization`) and in the audit log.
+
+### Rate control, retries and circuit breaker
+
+`--rps`, `--delay` and `--jitter` share one schedule across all workers, so
+concurrency cannot multiply the request rate. `429` and `503` responses are
+retried up to `--max-retries` times, honoring `Retry-After` (delta seconds or
+HTTP date) and otherwise backing off exponentially, capped at 30 seconds. Once
+at least 20 attempts have been made, an error rate above `--max-error-rate`
+(transport errors, 5xx, and retried throttling) opens a circuit breaker: queued
+URLs are dropped, the reason is logged, audited, and written to
+`scan.json.circuit_breaker`.
+
+### robots.txt
+
+`--robots off` (default) ignores the file, `report` records every disallowed URL
+in the audit log but still crawls, and `respect` skips disallowed paths and
+counts them under `robots.blocked`. Only the `*` group is applied; the crawler
+never fetches `robots.txt` in `off` mode.
+
+### Identification
+
+The default User-Agent is `Pathscope/<version> (+repository URL)`, configurable
+with `--user-agent`. `--scan-id` adds `X-Pathscope-Scan-Id` so a defender can
+correlate traffic, and is also recorded in metadata and the audit log.
+
+### Audit log and redaction
+
+`<output_dir>/audit.jsonl` is append-only JSON lines (`0600`) recording scan
+start/stop, authorization, a SHA-256 hash of the effective configuration, every
+refused request with its stage and reason, retries, and circuit-breaker events.
+
+URL userinfo is removed from findings, errors, logs, `scan.json`, and the audit
+log. Header, cookie, bearer/basic, and token assignment values are replaced with
+`[REDACTED]` in free-form error text. This is covered by unit tests with
+crafted exception strings, not only by code review.
 
 ---
 
@@ -284,7 +369,15 @@ Beyond unit and integration tests, the suite includes:
   must stay unmatched and relative strings that are expected negatives;
 * `tests/unit/test_config_validation.py` — malformed, missing, mistyped, and
   out-of-range configuration plus CLI-over-config precedence;
-* `tests/unit/test_benchmark_harness.py` — sanity checks on benchmark metrics.
+* `tests/unit/test_benchmark_harness.py` — sanity checks on benchmark metrics;
+* `tests/unit/test_redaction.py` — URL userinfo, header/cookie/token values, and
+  crafted exception strings through the redaction layer;
+* `tests/unit/test_authorization.py` and `tests/integration/test_cli_governance.py`
+  — the authorization gate, scope-file validation/windows, and recorded metadata;
+* `tests/unit/test_throttle.py`, `tests/unit/test_robots.py`, and
+  `tests/crawler/test_engine_safe_operations.py` — pacing, Retry-After, circuit
+  breaking, robots policy, audit log integrity, identity headers, and redaction
+  of persisted output.
 
 ---
 
@@ -357,8 +450,6 @@ Always maintain:
 
 Planned work, not implemented yet:
 
-*  rate limiting, `Retry-After` handling and circuit breaking
-*  authorization metadata (`--authorized-by`) recorded in reports
 *  versioned report schema with stable finding IDs and scan diffing
 *  SARIF 2.1.0, CSV and self-contained HTML exporters
 *  plugin scanner API with per-plugin isolation
