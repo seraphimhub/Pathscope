@@ -66,12 +66,12 @@ gzip bomb served from a local server with a 10 KB cap returned
 `decoded_bytes=10000`, `truncated=True`, and the whole measurement process
 peaked at **~43 MB RSS** (`/usr/bin/time -v`, maximum resident set size 43,036
 KB). A self-replicating crawler trap with `max_pages=12` terminated in
-**0.33 s** with `stop_reason=max_pages` after 12 pages (~37 pages/s on
-loopback). Worst-case regex calls on 250 KB/100 KB hostile inputs measured:
-redaction **0.037 s**, robots wildcard match **0.012 s**, endpoint scan
-**0.168 s**. The bundled low-latency benchmark on the same machine measured
-**53.19 pages/s** at 4 workers (28 responses, 0 errors); absolute throughput is
-local-machine specific.
+**0.33–0.44 s over repeated runs** with `stop_reason=max_pages` after 12 pages
+(~27–37 pages/s on loopback). Worst-case regex calls on 250 KB/100 KB hostile
+inputs measured: redaction **0.037–0.053 s**, robots wildcard match **0.012 s**,
+endpoint scan **0.140–0.168 s**. The bundled low-latency benchmark on the same
+machine measured **49.99–53.19 pages/s** at 4 workers (27–28 responses, 0
+errors); absolute throughput is local-machine specific.
 
 Memory ceiling estimate with defaults (`workers=8`, 2 MB per response): eight
 in-flight bodies (~16 MB) plus a conservative 5–10× DOM/text expansion during
