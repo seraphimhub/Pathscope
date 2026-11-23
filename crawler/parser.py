@@ -6,6 +6,8 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from core.security import host_in_scope
+
 # (tag, attribute) pairs whose values are crawlable references.
 _REFERENCE_ATTRS: tuple[tuple[str, str], ...] = (
     ("a", "href"),
@@ -48,7 +50,6 @@ def extract_links(html: str, base_url: str, base_host: str) -> set[str]:
         return set()
 
     links: set[str] = set()
-    target_host = (base_host or "").lower()
 
     for tag_name, attribute in _REFERENCE_ATTRS:
         for tag in soup.find_all(tag_name):
@@ -57,20 +58,20 @@ def extract_links(html: str, base_url: str, base_host: str) -> set[str]:
                 raw = raw[0] if raw else None
             if not raw or not isinstance(raw, str):
                 continue
-            resolved = _resolve(raw, base_url, target_host)
+            resolved = _resolve(raw, base_url, base_host)
             if resolved:
                 links.add(resolved)
 
             if tag_name in {"img", "source"}:
                 for candidate in _srcset_urls(tag.get("srcset")):
-                    resolved = _resolve(candidate, base_url, target_host)
+                    resolved = _resolve(candidate, base_url, base_host)
                     if resolved:
                         links.add(resolved)
 
     return links
 
 
-def _resolve(raw: str, base_url: str, target_host: str) -> str | None:
+def _resolve(raw: str, base_url: str, base_host: str) -> str | None:
     """Resolve one reference and keep it only when it stays in scope."""
     raw = raw.strip()
     if not raw or raw.startswith("#"):
@@ -83,7 +84,9 @@ def _resolve(raw: str, base_url: str, target_host: str) -> str | None:
 
     if parsed.scheme.lower() not in _CRAWLABLE_SCHEMES:
         return None
-    if (parsed.netloc or "").lower() != target_host:
+    # One shared policy: IDNA, trailing dots, default ports and userinfo are all
+    # normalized by core.security instead of being compared as raw strings here.
+    if not host_in_scope(absolute, base_host):
         return None
     return normalize(absolute)
 

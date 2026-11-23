@@ -19,7 +19,7 @@ from typing import Any
 import click
 
 from core.banner import BANNER
-from core.config import load_cli_options_from_config, resolve_target_from_args
+from core.config import load_config_from_file, merge_cli_options
 from core.exceptions import PathscopeError
 from crawler.engine import DEFAULT_MAX_PAGES, Engine
 from crawler.fetcher import DEFAULT_MAX_REDIRECTS, DEFAULT_TIMEOUT
@@ -131,15 +131,15 @@ async def _run_cli(
     timeout: float = DEFAULT_TIMEOUT,
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
     block_private: bool = False,
+    explicit: dict[str, Any] | None = None,
 ) -> int:
     """Run one Pathscope scan using the resolved CLI + config + env values."""
     logging.getLogger().setLevel(logging.ERROR if quiet else logging.INFO)
 
     click.echo(BANNER)
 
-    resolved_target = target or resolve_target_from_args(
-        config, env_target=os.environ.get("TARGET_URL", "")
-    )
+    env_target = os.environ.get("TARGET_URL", "")
+    resolved_target = target or env_target
     if not resolved_target:
         click.echo("Error: No target URL provided. Use --target or set TARGET_URL env var.")
         sys.exit(1)
@@ -163,25 +163,31 @@ async def _run_cli(
         "block_private": block_private,
     }
 
-    if config:
-        merged = load_cli_options_from_config(config, defaults=defaults)
-        resolved_target = _ensure_scheme(str(merged.get("target", resolved_target)))
-        depth = int(merged.get("depth", depth))
-        workers = int(merged.get("workers", workers))
-        headers = merged.get("headers", headers) or headers
-        cookie = merged.get("cookie", cookie) or cookie
-        api = merged.get("api", api) or api
-        secrets = bool(merged.get("secrets", secrets))
-        endpoints = bool(merged.get("endpoints", endpoints))
-        js = bool(merged.get("js", js))
-        auth = merged.get("auth", auth) or auth
-        output_dir = str(merged.get("output_dir", output_dir))
-        max_pages = int(merged.get("max_pages", max_pages))
-        timeout = float(merged.get("timeout", timeout))
-        max_redirects = int(merged.get("max_redirects", max_redirects))
-        block_private = bool(merged.get("block_private", block_private))
-        if not quiet:
-            click.echo(f"Using configuration file: {config}")
+    try:
+        config_values = load_config_from_file(config, strict=True) if config else {}
+        merged = merge_cli_options(defaults, config_values, explicit)
+    except PathscopeError as exc:
+        click.echo(f"\n[!] Configuration error: {exc}")
+        return 2
+
+    if config and not quiet:
+        click.echo(f"Using configuration file: {config}")
+
+    resolved_target = _ensure_scheme(str(merged.get("target") or resolved_target))
+    depth = int(merged["depth"])
+    workers = int(merged["workers"])
+    headers = str(merged.get("headers") or "")
+    cookie = str(merged.get("cookie") or "")
+    api = str(merged.get("api") or "")
+    secrets = bool(merged["secrets"])
+    endpoints = bool(merged["endpoints"])
+    js = bool(merged["js"])
+    auth = merged.get("auth")
+    output_dir = str(merged["output_dir"])
+    max_pages = int(merged["max_pages"])
+    timeout = float(merged["timeout"])
+    max_redirects = int(merged["max_redirects"])
+    block_private = bool(merged["block_private"])
 
     os.environ["TARGET_URL"] = str(resolved_target)
     os.environ["CRAWL_DEPTH"] = str(depth)
@@ -219,6 +225,8 @@ async def _run_cli(
     findings = len(runner.findings)
     errors_count = len(runner.errors)
     elapsed = runner.elapsed
+    requests_made = runner.requests_made
+    successful = runner.successful_pages
 
     if not quiet:
         click.echo("\n[!] Scan complete")
@@ -226,6 +234,8 @@ async def _run_cli(
         click.echo("")
         click.echo(f"Total Discovered : {discovered}")
         click.echo(f"Total Pages      : {runner.pages_fetched}")
+        click.echo(f"Total Requests   : {requests_made}")
+        click.echo(f"Successful       : {successful}")
         click.echo(f"Total Endpoints  : {endpoints_total}")
         click.echo(f"Total Findings   : {findings}")
         click.echo(f"Total Errors     : {errors_count}")
@@ -241,6 +251,8 @@ async def _run_cli(
                     "target": str(resolved_target),
                     "discovered": discovered,
                     "pages": runner.pages_fetched,
+                    "requests": requests_made,
+                    "successful": successful,
                     "endpoints": endpoints_total,
                     "findings": findings,
                     "errors": errors_count,
@@ -325,7 +337,9 @@ TARGET_OPTION = click.option(
     show_default=True,
     help="Refuse loopback, private, link-local and metadata targets.",
 )
+@click.pass_context
 def cli(
+    ctx: click.Context,
     *,
     target: str | None,
     depth: int,
@@ -347,6 +361,28 @@ def cli(
     block_private: bool,
 ) -> None:
     """Pathscope: professional web discovery and attack surface intelligence."""
+    explicit = {
+        name: value
+        for name, value in {
+            "target": target,
+            "depth": depth,
+            "workers": workers,
+            "headers": headers,
+            "cookie": cookie,
+            "api": api,
+            "secrets": secrets,
+            "endpoints": endpoints,
+            "js": js,
+            "auth": auth,
+            "output_dir": output_dir,
+            "max_pages": max_pages,
+            "timeout": timeout,
+            "max_redirects": max_redirects,
+            "block_private": block_private,
+        }.items()
+        if ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
+    }
+
     sys.exit(
         asyncio.run(
             _run_cli(
@@ -368,6 +404,7 @@ def cli(
                 timeout=timeout,
                 max_redirects=max_redirects,
                 block_private=block_private,
+                explicit=explicit,
             )
         )
     )

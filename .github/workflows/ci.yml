@@ -112,12 +112,12 @@ jobs:
 
       - name: Verify no obvious secrets in tracked files
         run: |
-          if git grep -n -E "AKIA[0-9A-Z]{16}" --silent; then
+          if git grep --silent -n -E "AKIA[0-9A-Z]{16}"; then
             echo "Potential AWS key pattern found in tracked files"
             git grep -n -E "AKIA[0-9A-Z]{16}"
             exit 1
           fi
-          if git grep -n -E "FAKE-TOKEN-EXAMPLE" --silent; then
+          if git grep --silent -n -E "FAKE-TOKEN-EXAMPLE"; then
             echo "Fake test token pattern found in tracked files"
             git grep -n -E "FAKE-TOKEN-EXAMPLE"
             exit 1

@@ -25,7 +25,14 @@ import aiohttp
 
 from core.exceptions import PathscopeError
 from core.models import DiscoveredUrl
-from core.security import check_url, host_in_scope, hostname_of, is_private_host
+from core.resolver import SafeResolver
+from core.security import (
+    canonical_netloc,
+    check_url,
+    host_in_scope,
+    hostname_of,
+    is_private_host,
+)
 from crawler.fetcher import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_REDIRECTS,
@@ -65,7 +72,11 @@ class Engine:
         output_dir: str = "output",
     ) -> None:
         self.start_url = start_url
-        self.base_host = urlparse(start_url).netloc
+        try:
+            self.base_host = canonical_netloc(start_url)
+        except ValueError:
+            # An invalid port cannot define a scope; every URL will fail closed.
+            self.base_host = ""
         self.max_depth = max(0, depth)
         self.workers = max(1, workers)
         self.timeout = timeout
@@ -87,12 +98,24 @@ class Engine:
         self.errors: list[dict[str, Any]] = []
         self.elapsed: float = 0.0
         self.pages_fetched: int = 0
+        self.requests_made: int = 0
         self.redirects_followed: int = 0
+        self.status_counts: dict[int, int] = {}
 
         self._finding_keys: set[tuple[Any, ...]] = set()
         self._queued: set[str] = set()
 
     # -- public API ---------------------------------------------------------
+
+    @property
+    def successful_pages(self) -> int:
+        """Number of fetches that returned a 2xx status."""
+        return sum(count for status, count in self.status_counts.items() if 200 <= status < 300)
+
+    @property
+    def failed_pages(self) -> int:
+        """Number of fetches that returned a 4xx/5xx status."""
+        return sum(count for status, count in self.status_counts.items() if status >= 400)
 
     async def run(self) -> None:
         """Crawl from ``start_url`` and persist findings when configured."""
@@ -109,7 +132,12 @@ class Engine:
         self._enqueue(queue, target, depth=0, source_url=self.start_url, method="seed")
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
-        connector = aiohttp.TCPConnector(limit=self.workers * 2)
+        resolver = SafeResolver(allow_private=False) if self.block_private else None
+        connector = aiohttp.TCPConnector(
+            limit=self.workers * 2,
+            resolver=resolver,
+            ttl_dns_cache=0,
+        )
         try:
             async with aiohttp.ClientSession(
                 connector=connector,
@@ -128,6 +156,8 @@ class Engine:
                     await asyncio.gather(*workers, return_exceptions=True)
         finally:
             self.elapsed = time.perf_counter() - started
+            if resolver is not None:
+                await resolver.close()
             if self.persist:
                 self.write_findings()
 
@@ -188,7 +218,9 @@ class Engine:
             return
 
         self.pages_fetched += 1
+        self.requests_made += 1 + len(result.redirects)
         self.redirects_followed += len(result.redirects)
+        self.status_counts[result.status] = self.status_counts.get(result.status, 0) + 1
         self._mark_crawled(url, result)
 
         if not result.text:

@@ -32,13 +32,20 @@ def test_endpoint_scanner_extracts_multiple_paths():
     assert endpoints >= {"/api/v1/users", "/api/v1/posts", "/health"}
 
 
-def test_endpoint_scanner_current_provenance_is_extraction_only():
-    """Current scanner sets provenance implicitly by the presence of the path."""
-    content = '"/api/v1/users"'
+def test_endpoint_scanner_reports_location_and_evidence():
+    """Every finding must say where it came from and quote the literal."""
+    content = 'var config = {};\nfetch("/api/v1/users");'
     findings = scan_endpoints("https://example.com/app.js", content)
-    for finding in findings:
-        assert finding.get("provenance") is None
-        assert finding.get("evidence") is None
+
+    assert findings
+    finding = findings[0]
+    assert finding["evidence"] == "/api/v1/users"
+    assert finding["url"] == "https://example.com/app.js"
+    assert finding["line"] == 2
+    assert finding["category"] == "path"
+    # No request is made, so no provenance chain or verification is claimed.
+    assert finding.get("provenance") is None
+    assert finding.get("verification_status") is None
 
 
 def test_endpoint_scanner_current_verification_status_is_unverified():

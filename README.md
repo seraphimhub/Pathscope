@@ -34,8 +34,8 @@ flowchart TD
 *  Deep recursive internal route traversal
 *  Endpoint extraction from HTML and JavaScript
 *  Secret pattern discovery without exposing secret values
-*  Strict host-scope enforcement, including redirect hops
-*  Optional private/loopback/metadata address guard
+*  Strict host-scope enforcement, including every redirect hop
+*  Optional private/loopback/metadata address guard enforced at DNS resolution
 *  Redirect chain following with loop detection and hop limits
 *  Per-URL error isolation (one failure never aborts the scan)
 *  Response size caps and non-text content rejection
@@ -146,20 +146,114 @@ Example:
     "type": "endpoint",
     "url": "https://example.com/app.js",
     "endpoint": "/api/v1/users",
+    "category": "path",
+    "evidence": "/api/v1/users",
     "line": 12
   },
   {
     "type": "secret_pattern",
     "url": "https://example.com/config.js",
     "pattern": "token",
+    "category": "token",
+    "evidence": "var token = \"********\";",
     "line": 4,
     "count": 1
   }
 ]
 ```
 
-Findings are de-duplicated and never contain the matched secret value: a
-secret finding records *where* the pattern appears, not what it is.
+Every finding carries `evidence`, `category`, and `line` so a reviewer can
+check it without re-fetching the page. Findings are de-duplicated and never
+contain the matched secret value: quoted literals and long unquoted values in
+`evidence` are masked with `*`. A match is a pattern occurrence only — Pathscope
+does not verify that a credential is live and never uses one.
+
+`--json` prints a separate machine-readable scan summary (pages, requests,
+successful fetches, errors, redirects, elapsed time) to stdout.
+
+---
+
+## Scope and SSRF protection
+
+One policy module (`core/security.py`) is used by the CLI, the engine, the
+fetcher, and every URL source (links, JavaScript, redirects):
+
+* hosts are canonicalized (IDNA, trailing dot, default port, IPv6 brackets)
+  before comparison, so `https://example.com./` cannot slip past scope checks;
+* the start host is in scope, and subdomains are only in scope when the start
+  URL itself is a subdomain pattern opt-in — unrelated hosts are dropped even
+  when reachable;
+* redirect `Location` headers are re-checked hop by hop and never trusted
+  because the original host passed;
+* with `--block-private`, address checks run **inside the resolver handed to
+  the HTTP transport**. Every address in the DNS answer (IPv4, IPv6,
+  IPv4-mapped, loopback, private, link-local, unspecified, multicast) is
+  rejected if any one is non-public, and the connector dials the exact
+  addresses that were validated. A second lookup between check and connect
+  (DNS rebinding) therefore cannot swap in a private address.
+
+Private targets remain allowed by default (local lab testing); `--block-private`
+is opt-in. Scope rules apply regardless of that setting.
+
+---
+
+## Configuration
+
+`--config pathscope.yaml` accepts a mapping of any CLI option:
+
+```yaml
+target: https://example.com
+depth: 3
+workers: 8
+timeout: 10
+block_private: true
+```
+
+Precedence is explicit: command-line flags (when actually typed) override the
+config file, which overrides defaults. Config files are validated before a scan
+starts — unknown keys are kept for forward compatibility, but wrong types,
+out-of-range numbers, unreadable YAML, a non-mapping root, and conflicting
+security settings are rejected with a non-zero exit instead of silently
+falling back to defaults.
+
+---
+
+## Benchmarking
+
+The crawler ships with a reproducible local harness:
+
+```bash
+python -m benchmarks.bench_crawler --scenario low-latency --runs 3
+python -m benchmarks.bench_crawler --scenario all --levels 1,2,4,8,16 --runs 5
+```
+
+Scenarios cover low and high latency, a slow server, dropped connections,
+large responses, and pages full of duplicate links. Each level is run several
+times; the report separates graph size, visited pages, HTTP requests,
+successful fetches, transport errors, elapsed time, throughput, and the
+maximum concurrency actually observed by the server, and prints best/median/min
+throughput plus the spread. These are single-machine measurements — compare
+levels within one run rather than quoting absolute numbers.
+
+---
+
+## Testing
+
+```bash
+python -m pytest tests/ --strict-markers -q
+```
+
+Beyond unit and integration tests, the suite includes:
+
+* `tests/security/test_ssrf_and_scope_bypass.py` — address classification,
+  canonicalization tricks, and connector-level proof that a private DNS answer
+  is never dialed;
+* `tests/unit/test_discovery_accuracy.py` — precision/recall against a labelled
+  fixture (`tests/fixtures/discovery/`), including commented-out examples that
+  must stay unmatched and relative strings that are expected negatives;
+* `tests/unit/test_config_validation.py` — malformed, missing, mistyped, and
+  out-of-range configuration plus CLI-over-config precedence;
+* `tests/unit/test_benchmark_harness.py` — sanity checks on benchmark metrics.
 
 ---
 
@@ -231,7 +325,7 @@ Always maintain:
 *  CSV / SARIF exporters
 *  sitemap ingestion
 *  plugin scanner API
-*  DNS-resolution based address checks
+*  TLS certificate inspection
 
 ---
 

@@ -1,24 +1,38 @@
-"""Baseline crawler benchmark harness.
+"""Reproducible crawler benchmark harness.
 
-Run with: .venv/bin/python -m benchmarks.bench_crawler
+Run with: .venv/bin/python -m benchmarks.bench_crawler --scenario low-latency
 
-Starts a local multi-threaded mock site, then crawls it once per ``--levels``
-value with ``Engine(workers=level)``. Each mocked request sleeps for
-``--latency`` seconds, so the reported pages/second reflects the crawler's
-actual parallelism rather than the speed of an in-memory lookup.
+Each scenario builds a fixed page graph and serves it from a local multi-threaded
+HTTP server with a controllable per-request latency, so the reported throughput
+reflects crawler parallelism rather than an in-memory lookup. Every level runs
+``--runs`` times and the report shows the spread, because a single run is not a
+performance measurement.
 
-The harness is deterministic (fixed graph, fixed page count, best-of-N runs),
-which makes it usable as a regression gate after engine changes.
+Metrics distinguish what is easy to confuse:
+
+* ``graph_pages``   pages that exist in the synthetic site
+* ``visited``       pages the crawler enqueued and attempted
+* ``requests``      HTTP requests actually issued (redirects included)
+* ``successes``     fetches with a 2xx status
+* ``errors``        fetches that failed at the transport/policy level
+* ``throughput``    successful fetches per second
+
+Scenarios: ``low-latency``, ``high-latency``, ``slow-server``, ``flaky``,
+``large``, ``duplicates``, or ``all``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import platform
 import socket
+import statistics
+import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import ClassVar
 from urllib.parse import urljoin
@@ -27,32 +41,171 @@ import click
 
 from crawler.engine import Engine
 
-PAGE_COUNT = 40
-LINK_DENSITY = 4  # outgoing links per page
-DEFAULT_DEPTH = 6
-DEFAULT_LATENCY_MS = 10
-
-_PAGES: dict[str, str] = {}
+LINK_DENSITY = 4
+ROOT_FANOUT = 8
+DEFAULT_LEVELS = "1,2,4,8"
+DEFAULT_RUNS = 3
 
 
-def build_page(index: int, base: str) -> str:
-    links = []
+@dataclass(frozen=True)
+class Scenario:
+    """Immutable description of a benchmark site and its behaviour."""
+
+    name: str
+    pages: int
+    latency_ms: int
+    page_bytes: int = 1024
+    failure_every: int = 0
+    duplicate_links: int = 1
+
+    @property
+    def latency(self) -> float:
+        return max(0, self.latency_ms) / 1000
+
+
+SCENARIOS: dict[str, Scenario] = {
+    "low-latency": Scenario("low-latency", pages=40, latency_ms=5),
+    "high-latency": Scenario("high-latency", pages=20, latency_ms=100),
+    "slow-server": Scenario("slow-server", pages=10, latency_ms=300),
+    "flaky": Scenario("flaky", pages=30, latency_ms=5, failure_every=5),
+    "large": Scenario("large", pages=10, latency_ms=5, page_bytes=200_000),
+    "duplicates": Scenario("duplicates", pages=10, latency_ms=5, duplicate_links=8),
+}
+
+_BASE = ""
+
+
+def build_page(index: int, scenario: Scenario) -> str:
+    links: list[str] = []
     for offset in range(LINK_DENSITY):
-        neighbor = (index + offset + 1) % PAGE_COUNT
-        links.append(f'<a href="{urljoin(base, f"/p{neighbor}")}">p{neighbor}</a>')
+        neighbor = (index + offset + 1) % scenario.pages
+        links.append(f'<a href="{urljoin(_BASE, f"/p{neighbor}")}">p{neighbor}</a>')
+
+    if scenario.duplicate_links > 1:
+        duplicates = "".join(
+            f'<a href="{urljoin(_BASE, f"/p{(index + 1) % scenario.pages}")}">dup</a>'
+            for _ in range(scenario.duplicate_links)
+        )
+        links.append(duplicates)
+
+    filler = "x" * max(0, scenario.page_bytes - 200)
     return (
         f"<html><body><h1>Page {index}</h1>"
         f"{''.join(links)}"
         '<script>fetch("/api/v1/items");</script>'
+        f"<p>{filler}</p>"
         "</body></html>"
     )
 
 
-def prepare_pages(base: str) -> dict[str, str]:
-    pages = {"/": f'<html><body><a href="{base}/p0">start</a></body></html>'}
-    for index in range(PAGE_COUNT):
-        pages[f"/p{index}"] = build_page(index, base)
-    return pages
+def build_site(scenario: Scenario, base: str) -> tuple[dict[str, str], set[str]]:
+    """Return ``(pages, failing_paths)`` for a scenario."""
+    pages: dict[str, str] = {
+        "/": "<html><body>"
+        + "".join(
+            f'<a href="{base}/p{index}">p{index}</a>'
+            for index in range(min(ROOT_FANOUT, scenario.pages))
+        )
+        + "</body></html>"
+    }
+    failures: set[str] = set()
+
+    for index in range(scenario.pages):
+        path = f"/p{index}"
+        pages[path] = build_page(index, scenario)
+        if scenario.failure_every and index % scenario.failure_every == 0:
+            failures.add(path)
+
+    return pages, failures
+
+
+class BenchHandler(BaseHTTPRequestHandler):
+    """Serves the active scenario, tracking observed concurrency."""
+
+    latency: ClassVar[float] = 0.0
+    pages: ClassVar[dict[str, str]] = {}
+    failures: ClassVar[set[str]] = set()
+    lock: ClassVar[threading.Lock] = threading.Lock()
+    active: ClassVar[int] = 0
+    max_active: ClassVar[int] = 0
+    requests: ClassVar[int] = 0
+
+    def do_GET(self) -> None:
+        path = self.path.split("?")[0]
+        with BenchHandler.lock:
+            BenchHandler.active += 1
+            BenchHandler.max_active = max(BenchHandler.max_active, BenchHandler.active)
+            BenchHandler.requests += 1
+        try:
+            if self.latency:
+                time.sleep(self.latency)
+            if path in BenchHandler.failures:
+                # Simulate a dropped connection rather than a clean HTTP error.
+                self.close_connection = True
+                self.connection.close()
+                return
+
+            body = BenchHandler.pages.get(path, "<html><body>missing</body></html>")
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        finally:
+            with BenchHandler.lock:
+                BenchHandler.active -= 1
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@dataclass
+class RunResult:
+    workers: int
+    elapsed: float
+    visited: int
+    requests: int
+    successes: int
+    errors: int
+    findings: int
+    observed_concurrency: int
+
+
+@dataclass
+class LevelResult:
+    workers: int
+    runs: list[RunResult] = field(default_factory=list)
+
+    @property
+    def throughputs(self) -> list[float]:
+        return [run.successes / max(run.elapsed, 1e-6) for run in self.runs]
+
+    @property
+    def best(self) -> RunResult:
+        return min(self.runs, key=lambda run: run.elapsed)
+
+    def summary(self) -> dict[str, float | int]:
+        throughputs = self.throughputs
+        best = self.best
+        return {
+            "workers": self.workers,
+            "runs": len(self.runs),
+            "pages_visited": best.visited,
+            "requests": best.requests,
+            "successes": best.successes,
+            "errors": best.errors,
+            "findings": best.findings,
+            "observed_concurrency": best.observed_concurrency,
+            "elapsed_best": round(best.elapsed, 4),
+            "elapsed_median": round(statistics.median(run.elapsed for run in self.runs), 4),
+            "throughput_best": round(max(throughputs), 2),
+            "throughput_median": round(statistics.median(throughputs), 2),
+            "throughput_min": round(min(throughputs), 2),
+            "throughput_spread_pct": round(
+                (max(throughputs) - min(throughputs)) / max(max(throughputs), 1e-6) * 100, 1
+            ),
+        }
 
 
 def find_free_port() -> int:
@@ -61,128 +214,146 @@ def find_free_port() -> int:
         return sock.getsockname()[1]
 
 
-class BenchHandler(BaseHTTPRequestHandler):
-    """Serves the prepared page graph with an artificial per-request latency."""
-
-    latency: ClassVar[float] = DEFAULT_LATENCY_MS / 1000
-    pages: ClassVar[dict[str, str]] = {}
-
-    def do_GET(self) -> None:
-        time.sleep(self.latency)
-        body = self.pages.get(self.path.split("?")[0], "<html><body>missing</body></html>")
-        payload = body.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, format: str, *args: object) -> None:
-        pass
+def machine_info() -> dict[str, object]:
+    return {
+        "platform": platform.platform(),
+        "python": sys.version.split()[0],
+        "cpu_count": os.cpu_count(),
+        "implementation": platform.python_implementation(),
+    }
 
 
-@dataclass
-class BenchmarkResult:
-    concurrency: int
-    elapsed: float
-    pages: int
-    pages_per_second: float
-    findings: int
-    errors: int = 0
+async def run_once(server_url: str, depth: int, workers: int) -> RunResult:
+    with BenchHandler.lock:
+        BenchHandler.active = 0
+        BenchHandler.max_active = 0
+        BenchHandler.requests = 0
 
-
-async def run_once(server_url: str, depth: int, concurrency: int) -> BenchmarkResult:
-    # ``workers`` is the knob under test: the engine must honour it, otherwise
-    # every level measures the same thing.
-    engine = Engine(server_url, depth=depth, workers=concurrency, persist=False)
+    engine = Engine(server_url, depth=depth, workers=workers, persist=False)
     started = time.perf_counter()
     await engine.run()
     elapsed = time.perf_counter() - started
-    return BenchmarkResult(
-        concurrency=concurrency,
+
+    return RunResult(
+        workers=workers,
         elapsed=elapsed,
-        pages=engine.pages_fetched,
-        pages_per_second=engine.pages_fetched / max(elapsed, 1e-6),
-        findings=len(engine.findings),
+        visited=engine.pages_fetched,
+        requests=engine.requests_made,
+        successes=engine.successful_pages,
         errors=len(engine.errors),
+        findings=len(engine.findings),
+        observed_concurrency=BenchHandler.max_active,
     )
 
 
-async def main_async(
-    host: str,
-    port: int,
+async def run_levels(
+    base: str,
     depth: int,
+    levels: list[int],
     runs: int,
-    concurrency_levels: list[int],
-) -> list[BenchmarkResult]:
-    base = f"http://{host}:{port}"
-    BenchHandler.pages = prepare_pages(base)
-
-    results: list[BenchmarkResult] = []
-    repeats = max(1, runs)
-    for concurrency in concurrency_levels:
-        level_results: list[BenchmarkResult] = []
-        for run_index in range(repeats):
-            result = await run_once(base, depth, concurrency)
-            level_results.append(result)
+) -> list[LevelResult]:
+    results: list[LevelResult] = []
+    for workers in levels:
+        level = LevelResult(workers=workers)
+        for run_index in range(runs):
+            result = await run_once(base, depth, workers)
+            level.runs.append(result)
             print(
                 json.dumps(
                     {
-                        "concurrency": concurrency,
+                        "workers": workers,
                         "run": run_index + 1,
-                        "elapsed": round(result.elapsed, 3),
-                        "pages": result.pages,
-                        "pages_per_second": round(result.pages_per_second, 2),
-                        "findings": result.findings,
+                        "elapsed": round(result.elapsed, 4),
+                        "visited": result.visited,
+                        "requests": result.requests,
+                        "successes": result.successes,
                         "errors": result.errors,
+                        "observed_concurrency": result.observed_concurrency,
                     }
                 )
             )
-        results.append(min(level_results, key=lambda item: item.elapsed))
+        results.append(level)
+    return results
 
+
+def serve(scenario: Scenario, host: str, port: int) -> tuple[ThreadingHTTPServer, str, int]:
+    base = f"http://{host}:{port}"
+    pages, failures = build_site(scenario, base)
+    BenchHandler.latency = scenario.latency
+    BenchHandler.pages = pages
+    BenchHandler.failures = failures
+    httpd = ThreadingHTTPServer((host, port), BenchHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, base, len(pages)
+
+
+def benchmark_scenario(
+    scenario: Scenario,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    depth: int = 6,
+    levels: list[int] | None = None,
+    runs: int = DEFAULT_RUNS,
+) -> list[LevelResult]:
+    """Run one scenario end to end and return per-level measurements."""
+    server_port = port or find_free_port()
+    httpd, base, graph_size = serve(scenario, host, server_port)
+    try:
+        results = asyncio.run(run_levels(base, depth, levels or [1, 2, 4, 8], max(1, runs)))
+    finally:
+        httpd.shutdown()
+        BenchHandler.pages = {}
+        BenchHandler.failures = set()
+
+    print(f"\n== scenario: {scenario.name} ==")
+    print(
+        f"graph_pages={graph_size} "
+        f"latency_ms={scenario.latency_ms} "
+        f"page_bytes={scenario.page_bytes} "
+        f"failure_every={scenario.failure_every or 'none'} "
+        f"runs={runs}"
+    )
+    for level in results:
+        summary = level.summary()
+        print(
+            "workers={workers} visited={pages_visited} requests={requests} "
+            "successes={successes} errors={errors} concurrency={observed_concurrency} "
+            "throughput best/median/min={throughput_best}/{throughput_median}/{throughput_min} p/s "
+            "spread={throughput_spread_pct}%".format(**summary)
+        )
     return results
 
 
 @click.command()
-@click.option("--host", default="127.0.0.1", help="bind address for the mock server")
-@click.option("--port", default=0, type=int, help="port for the mock server (0 = auto)")
-@click.option("--depth", default=DEFAULT_DEPTH, type=int, help="crawl depth")
-@click.option("--runs", default=1, type=int, help="repeated runs per concurrency level")
-@click.option("--levels", default="1,4,8", help="comma-separated worker counts")
 @click.option(
-    "--latency-ms",
-    default=DEFAULT_LATENCY_MS,
-    type=int,
-    help="artificial per-request latency in milliseconds",
+    "--scenario",
+    default="low-latency",
+    type=click.Choice([*SCENARIOS, "all"]),
+    show_default=True,
+    help="benchmark scenario to run",
 )
-def main(
-    host: str,
-    port: int,
-    depth: int,
-    runs: int,
-    levels: str,
-    latency_ms: int,
-) -> None:
-    concurrency_levels = [int(item) for item in levels.split(",") if item.strip()]
-    BenchHandler.latency = max(0, latency_ms) / 1000
-    server_port = port or find_free_port()
-    httpd = ThreadingHTTPServer((host, server_port), BenchHandler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=0, type=int, help="0 picks a free port")
+@click.option("--depth", default=6, type=int, show_default=True)
+@click.option("--levels", default=DEFAULT_LEVELS, show_default=True)
+@click.option("--runs", default=DEFAULT_RUNS, type=int, show_default=True)
+def main(scenario: str, host: str, port: int, depth: int, levels: str, runs: int) -> None:
+    """Benchmark the Pathscope crawler against reproducible local scenarios."""
+    selected = list(SCENARIOS.values()) if scenario == "all" else [SCENARIOS[scenario]]
+    level_list = [int(value) for value in levels.split(",") if value.strip()]
 
-    try:
-        results = asyncio.run(main_async(host, server_port, depth, runs, concurrency_levels))
-    finally:
-        httpd.shutdown()
-        BenchHandler.pages = {}
-
-    print("\n== Benchmark complete (best run per level) ==")
-    for result in results:
-        print(
-            f"workers={result.concurrency}: {result.pages_per_second:.2f} pages/s, "
-            f"{result.pages} pages, {result.elapsed:.3f}s, "
-            f"{result.findings} findings, {result.errors} errors"
+    print(json.dumps({"machine": machine_info()}))
+    for item in selected:
+        benchmark_scenario(
+            item,
+            host=host,
+            port=port,
+            depth=depth,
+            levels=level_list,
+            runs=runs,
         )
+    print("\nNote: numbers are local-machine measurements; compare levels within a run.")
 
 
 if __name__ == "__main__":
