@@ -63,13 +63,11 @@ jobs:
 
       - name: Tests
         run: |
-          pytest tests/ --strict-markers -q
-        env:
-          PYTHONPATH: .
+          python -m pytest tests/ --strict-markers -q
 
       - name: Coverage
         run: |
-          pytest tests/ \
+          python -m pytest tests/ \
             --cov=crawler \
             --cov=scanners \
             --cov=core \
