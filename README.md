@@ -1,3 +1,7 @@
+# Pathscope
+
+**Repository:** https://github.com/seraphimhub/Pathscope
+
 ## Overview
 Pathscope is a **high-performance asynchronous web discovery framework** built for **authorized internal security auditing**, **route intelligence**, and **surface mapping**.
 
@@ -5,7 +9,7 @@ Designed with a modular architecture, Pathscope combines:
 - deep recursive crawling
 - endpoint discovery
 - secret pattern scanning
-- SPA-aware extensibility
+- JavaScript-aware endpoint extraction
 - structured JSON output
 
 It is optimized for modern engineering and security teams working with complex internal web estates.
@@ -24,7 +28,7 @@ flowchart TD
     F --> H[Secret Scanner]
     F --> I[Future Plugins]
     B --> J[JSON Output]
-````
+```
 
 ---
 
@@ -65,11 +69,13 @@ $ python3 cli.py --target https://example.com --depth 3 --workers 8
 
 ## Installation
 
-Clone repository:
+Requirements: Python 3.11 or newer (CI covers 3.11, 3.12 and 3.13).
+
+Clone the repository:
 
 ```bash id="0z9wzj"
-git clone https://github.com/seraphim-blip/pathscope.git
-cd pathscope
+git clone https://github.com/seraphimhub/Pathscope.git
+cd Pathscope
 ```
 
 Create virtual environment:
@@ -85,7 +91,9 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Optional Playwright support:
+Playwright is pinned in `requirements.txt` for the planned SPA renderer; the
+current crawler is HTTP-only and never needs a browser. Installing Chromium is
+only required when that renderer lands:
 
 ```bash id="nztc95"
 playwright install chromium
@@ -95,10 +103,10 @@ playwright install chromium
 
 ## Quick Start
 
-### Interactive
+### Via environment
 
 ```bash id="uz4w5e"
-python3 cli.py
+TARGET_URL=https://example.com python3 cli.py --depth 2
 ```
 
 ### CLI mode
@@ -110,23 +118,32 @@ python3 cli.py --target https://example.com --depth 3 --workers 8
 ### Common options
 
 ```text
---target URL            target to crawl (or TARGET_URL)
---depth N               maximum crawl depth (default 2)
---workers N             concurrent request budget (default 8)
---max-pages N           hard cap on visited pages (default 1000)
---timeout SECONDS       per-request timeout (default 20)
---max-redirects N       redirect hops followed per request (default 5)
---output-dir PATH       where findings.json is written (default output)
---block-private         refuse loopback/private/link-local/metadata targets
---secrets/--no-secrets  toggle secret pattern scanning
+--target URL              target to crawl (or the TARGET_URL env var)
+--depth N                 maximum crawl depth (default 2)
+--workers N               concurrent request budget (default 8)
+--max-pages N             hard cap on visited pages (default 1000)
+--timeout SECONDS         per-request timeout (default 20)
+--max-redirects N         redirect hops followed per request (default 5)
+--output-dir PATH         where findings.json is written (default "output",
+                          or PATHSCOPE_OUTPUT_DIR)
+--block-private           refuse loopback/private/link-local/metadata targets
+--allow-private           permit private targets (default)
+--secrets/--no-secrets    toggle secret pattern scanning (default on)
 --endpoints/--no-endpoints
---js/--no-js            toggle JavaScript analysis
---headers JSON|k:v      extra request headers
---cookie JSON|k:v       cookies to send
---config PATH           YAML config file
---quiet                 suppress the summary
---json                  emit a machine-readable summary
+                          toggle endpoint discovery (default on)
+--js/--no-js              toggle JavaScript analysis (default on)
+--headers JSON|k:v        additional request headers
+--cookie JSON|k:v         cookies to send
+--api VALUE               API key or JSON token for auth
+--auth VALUE              auth profile or token
+--config PATH             YAML config file
+--quiet                   suppress the summary
+--json                    emit a machine-readable summary to stdout
 ```
+
+Exit codes: `0` for a completed scan (and for a clean Ctrl-C), `2` for an
+invalid target, a rejected configuration, or a policy refusal such as
+`--block-private` on a private address.
 
 ---
 
@@ -180,9 +197,10 @@ fetcher, and every URL source (links, JavaScript, redirects):
 
 * hosts are canonicalized (IDNA, trailing dot, default port, IPv6 brackets)
   before comparison, so `https://example.com./` cannot slip past scope checks;
-* the start host is in scope, and subdomains are only in scope when the start
-  URL itself is a subdomain pattern opt-in — unrelated hosts are dropped even
-  when reachable;
+* the scope is an exact host match (with the default port normalized), so
+  unrelated hosts, other ports, and subdomains such as `admin.example.com` are
+  dropped even when reachable — the policy supports an explicit subdomain
+  opt-in, but the crawler does not enable it;
 * redirect `Location` headers are re-checked hop by hop and never trusted
   because the original host passed;
 * with `--block-private`, address checks run **inside the resolver handed to
@@ -212,9 +230,11 @@ block_private: true
 Precedence is explicit: command-line flags (when actually typed) override the
 config file, which overrides defaults. Config files are validated before a scan
 starts — unknown keys are kept for forward compatibility, but wrong types,
-out-of-range numbers, unreadable YAML, a non-mapping root, and conflicting
-security settings are rejected with a non-zero exit instead of silently
-falling back to defaults.
+out-of-range numbers, unreadable YAML, and a non-mapping root are rejected with
+exit code 2 instead of silently falling back to defaults. For security-relevant
+keys such as `block_private`, the value you actually pass on the command line
+wins over the file, and the file wins over the built-in default; nothing is
+applied silently.
 
 ---
 
@@ -260,13 +280,16 @@ Beyond unit and integration tests, the suite includes:
 ## Project Structure
 
 ```text
-pathscope/
-├── cli.py
+Pathscope/
+├── cli.py              # Click entry point, config merging, summaries
+├── core/               # config, scope/address policy, DNS resolver, models
+├── crawler/            # engine, fetcher, HTML/JS parser
+├── scanners/           # endpoint and secret-pattern scanners
+├── benchmarks/         # reproducible crawler benchmark harness
+├── tests/              # unit, integration, security tests and fixtures
+├── output/             # default findings.json destination
 ├── requirements.txt
-├── output/
-├── core/
-├── crawler/
-└── scanners/
+└── .github/workflows/ci.yml
 ```
 
 ---
@@ -279,22 +302,24 @@ Workflow:
 .github/workflows/ci.yml
 ```
 
-Checks (Python 3.11 / 3.12 / 3.13):
+Jobs:
 
-* import and syntax validation
-* `ruff check` and `ruff format --check`
-* `mypy` on `core`, `crawler`, `scanners`
-* `bandit` static security scan
-* full `pytest` suite and coverage report
-* secret-pattern guard over tracked files
+* `quality` on Python 3.11, 3.12 and 3.13 — import validation, `ruff check .`,
+  `ruff format --check .`, `mypy` on `core`, `crawler`, `scanners`, `bandit`
+  static scan, the full `pytest` suite, and a coverage report
+* `smoke` — boots the CLI and verifies the public surface still imports and runs
+* a guard that rejects known secret patterns (AWS key shape, fake test tokens)
+  in tracked files
 
 Local equivalent:
 
 ```bash
 ruff check . && ruff format --check .
 python -m mypy core crawler scanners
-bandit -r core crawler scanners
+bandit -r core crawler scanners -iii
 python -m pytest tests/ --strict-markers -q
+python -m pytest tests/ --cov=core --cov=crawler --cov=scanners --cov-report=term-missing
+python -m benchmarks.bench_crawler --scenario low-latency --runs 3
 ```
 
 ---
@@ -319,13 +344,16 @@ Always maintain:
 
 ## Roadmap
 
-*  Playwright SPA renderer
-*  Redis distributed queue
-*  HTML reporting
-*  CSV / SARIF exporters
-*  sitemap ingestion
-*  plugin scanner API
-*  TLS certificate inspection
+Planned work, not implemented yet:
+
+*  rate limiting, `Retry-After` handling and circuit breaking
+*  authorization metadata (`--authorized-by`) recorded in reports
+*  versioned report schema with stable finding IDs and scan diffing
+*  SARIF 2.1.0, CSV and self-contained HTML exporters
+*  plugin scanner API with per-plugin isolation
+*  sitemap.xml / robots.txt ingestion and source-map analysis
+*  playbook-driven SPA rendering with the same scope enforcement
+*  distributed queue behind the existing in-memory interface
 
 ---
 
@@ -343,4 +371,4 @@ The **Pathscope** name, logo, and branding assets are reserved.
 
 ## Author
 
-Built by **Seraphim**.
+Built and maintained by **[seraphimhub](https://github.com/seraphimhub)**.
